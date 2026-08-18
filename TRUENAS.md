@@ -26,6 +26,11 @@ sh deploy/truenas-setup.sh
 
 Later updates: `git pull` in that directory, then re-run `deploy/truenas-setup.sh` so the image rebuilds.
 
+The image installs headless Chromium for the crawler's browser pass, so the
+first build after this change downloads roughly 500 MB and takes several extra
+minutes. Set **Fetch engine → Re-fetch thin pages in a real browser** off in
+Settings to leave it unused.
+
 ## Deploy from this Mac
 
 ```bash
