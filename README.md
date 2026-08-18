@@ -20,7 +20,7 @@ To populate the ledger from a NAS, a browser, or an AI endpoint — **run the co
 
 ```bash
 NAS=truenas.local sh deploy/push-to-truenas.sh
-# then open http://<nas-ip>:8080
+# then open http://<nas-ip>:3490
 ```
 
 To try the UI on this Mac only (data stays local and goes away when the laptop sleeps):

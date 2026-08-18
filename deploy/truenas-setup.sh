@@ -11,7 +11,7 @@ set -eu
 APP_DIR="${APP_DIR:-/mnt/Seawolf/FogSignal/taxdata}"
 DATA_DIR="${DATA_DIR:-/mnt/Seawolf/FogSignal/taxdata/sql}"
 IMAGE="${IMAGE:-taxdb-collector:local}"
-HOST_PORT="${HOST_PORT:-8080}"
+HOST_PORT="${HOST_PORT:-3490}"
 
 if [ ! -f "${APP_DIR}/Dockerfile" ]; then
   echo "No Dockerfile at ${APP_DIR}."
@@ -31,7 +31,8 @@ docker build -t "${IMAGE}" "${APP_DIR}"
 
 COMPOSE="${APP_DIR}/.compose.truenas.generated.yml"
 sed -e "s|/mnt/Seawolf/FogSignal/taxdata/sql|${DATA_DIR}|g" \
-    -e "s|\"8080:8080\"|\"${HOST_PORT}:8080\"|g" \
+    -e "s|\"3490:8080\"|\"${HOST_PORT}:8080\"|g" \
+    -e "s|port: 3490|port: ${HOST_PORT}|g" \
     "${APP_DIR}/compose.truenas.yml" > "${COMPOSE}"
 
 echo "Starting collector with data on ${DATA_DIR}…"

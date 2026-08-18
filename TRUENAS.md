@@ -3,7 +3,7 @@
 The collector runs on the NAS. SQLite lives on the **sql** dataset. Your Mac can be off.
 
 ```
-Mac (browser)  →  http://<nas-ip>:8080  →  TrueNAS container
+Mac (browser)  →  http://<nas-ip>:3490  →  TrueNAS container
                                         →  /mnt/Seawolf/FogSignal/taxdata/sql/tax.db
 ```
 
@@ -40,15 +40,17 @@ Or copy the folder onto an SMB share for `taxdata`, then SSH in:
 sh /mnt/Seawolf/FogSignal/taxdata/deploy/truenas-setup.sh
 ```
 
-## Optional: Custom App in the UI
+## Custom App in the UI
 
-After the image `taxdb-collector:local` exists, **Apps → Discover → Custom App → Install via YAML**. Paste `compose.truenas.yml`. Name the app `taxdb`.
+Image: `ghcr.io/talunjames/fssdatahub:latest` (GitHub Container Registry).
 
-If port 8080 is taken, change the left-hand port: `"18080:8080"`.
+If a previous install failed, delete it first. **Apps → Discover → Custom App → Install via YAML**. Name the app `datahub`. Paste `compose.truenas.yml`. The sql dataset must already exist.
+
+Host port is **3490** only (`3490:8080` — 8080 is inside the container, not on the NAS). Open `http://<nas-ip>:3490`.
 
 ## Open it
 
-`http://<nas-ip>:8080`
+`http://<nas-ip>:3490`
 
 Seed jurisdictions, plan a state, set API keys or a Llama URL under **Keys & crawl**. The file on disk is `/mnt/Seawolf/FogSignal/taxdata/sql/tax.db`.
 

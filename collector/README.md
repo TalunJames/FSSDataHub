@@ -36,7 +36,7 @@ Short version: datasets are `Seawolf/FogSignal/taxdata` (code) and `Seawolf/FogS
 NAS=truenas.local sh deploy/push-to-truenas.sh
 ```
 
-Open `http://<nas-ip>:8080`. `tax.db` is `/mnt/Seawolf/FogSignal/taxdata/sql/tax.db` and comes back after a reboot.
+Open `http://<nas-ip>:3490`. `tax.db` is `/mnt/Seawolf/FogSignal/taxdata/sql/tax.db` and comes back after a reboot.
 
 If Ollama is already an app on the same NAS, set **Local Llama / Ollama → Base URL** to that app’s IP (`http://172.16.x.x:11434`) or `http://host.docker.internal:11434` when Ollama listens on the host.
 

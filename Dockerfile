@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.source="https://github.com/TalunJames/FSSDataHub" \
+      org.opencontainers.image.title="FSSDataHub" \
+      org.opencontainers.image.description="Tax ledger collector for TrueNAS"
+
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

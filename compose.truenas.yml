@@ -1,33 +1,41 @@
-# Always-on collector for TrueNAS SCALE.
-# Code: /mnt/Seawolf/FogSignal/taxdata
-# Data: /mnt/Seawolf/FogSignal/taxdata/sql  (tax.db, archive, intake)
+# FSSDataHub — TrueNAS SCALE Custom App YAML
 #
-# On the NAS:  sh deploy/truenas-setup.sh
-# Or paste this YAML into Apps → Discover → Custom App → Install via YAML
-# after the image exists (the setup script builds it).
+# Apps → Discover → Custom App → Install via YAML
+# Delete any failed install first.
+# Dataset must exist: /mnt/Seawolf/FogSignal/taxdata/sql
+#
+# Host port 3490 only. The 8080 on the right is inside the container
+# and does not take the NAS app already on 8080.
 
-name: taxdb
+x-notes: |
+  # FSSDataHub
+
+  Open http://NAS-IP:3490
+
+  Database: /mnt/Seawolf/FogSignal/taxdata/sql/tax.db
+
+x-portals:
+  - host: 0.0.0.0
+    name: Web UI
+    path: /
+    port: 3490
+    scheme: http
+
+x-metadata:
+  title: FSSDataHub
+  home: https://github.com/TalunJames/FSSDataHub
+  icon: "https://cdn-icons-png.flaticon.com/512/17193/17193728.png"
 
 services:
   collector:
-    image: taxdb-collector:local
-    pull_policy: never
+    image: ghcr.io/talunjames/fssdatahub:latest
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "3490:8080"
     environment:
       TAX_DATABASE_DATA: /data
       TZ: America/Los_Angeles
-      COLLECTOR_USER: taxdb
-      # COLLECTOR_PASSWORD: change-me
-      LLAMA_BASE_URL: http://host.docker.internal:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - /mnt/Seawolf/FogSignal/taxdata/sql:/data
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 25s
+    labels:
+      icon: "https://cdn-icons-png.flaticon.com/512/17193/17193728.png"
