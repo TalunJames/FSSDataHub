@@ -29,6 +29,7 @@ x-metadata:
 services:
   collector:
     image: ghcr.io/talunjames/fssdatahub:latest
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "3490:8080"

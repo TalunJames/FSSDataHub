@@ -566,16 +566,54 @@ def html_links(base_url, blob):
     return out
 
 
+def page_record(url, final_url, status, content_type, blob):
+    """The page shape every fetch path returns, whatever fetched it."""
+    text_out = extract_text(final_url, content_type, blob)
+    title = ""
+    if isinstance(text_out, tuple):
+        text, title = text_out
+    else:
+        text = text_out
+        if "html" in (content_type or ""):
+            try:
+                soup = BeautifulSoup(blob, "lxml")
+                if soup.title and soup.title.string:
+                    title = soup.title.string.strip()
+            except Exception:
+                pass
+    error = None
+    if status is not None and not 200 <= status < 400:
+        error = "HTTP %s" % status
+    return {
+        "url": url,
+        "final_url": final_url,
+        "http_status": status,
+        "content_type": content_type,
+        "blob": blob,
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "robots_allowed": 1,
+        "title": title,
+        "text": text or "",
+        "error": error,
+    }
+
+
+def error_page(url, error, final_url=None, robots_allowed_flag=1):
+    """A page that never yielded bytes, still worth recording as a gap."""
+    return {
+        "url": url, "final_url": final_url or url, "http_status": None,
+        "content_type": None, "blob": b"", "sha256": None,
+        "robots_allowed": robots_allowed_flag, "title": "", "text": "",
+        "error": error,
+    }
+
+
 def fetch_one(client, url, settings):
     max_bytes = store.as_int(settings.get("max_bytes"), 8000000)
     ua = settings.get("user_agent") or store.DEFAULTS["user_agent"]
     strict = store.as_bool(settings.get("strict_robots"))
     if not robots_allowed(client, url, ua, strict):
-        return {
-            "url": url, "final_url": url, "http_status": None, "content_type": None,
-            "blob": b"", "sha256": None, "robots_allowed": 0, "title": "",
-            "text": "", "error": "robots.txt disallows this URL",
-        }
+        return error_page(url, "robots.txt disallows this URL", robots_allowed_flag=0)
     try:
         with client.stream("GET", url) as resp:
             ctype = resp.headers.get("content-type", "")
@@ -590,43 +628,11 @@ def fetch_one(client, url, settings):
             status = resp.status_code
             final = str(resp.url)
     except httpx.HTTPError as exc:
-        return {
-            "url": url, "final_url": url, "http_status": None, "content_type": None,
-            "blob": b"", "sha256": None, "robots_allowed": 1, "title": "",
-            "text": "", "error": str(exc)[:400],
-        }
+        return error_page(url, str(exc)[:400])
     except FetchError as exc:
-        return {
-            "url": url, "final_url": url, "http_status": None, "content_type": None,
-            "blob": b"", "sha256": None, "robots_allowed": 1, "title": "",
-            "text": "", "error": str(exc),
-        }
+        return error_page(url, str(exc))
 
-    text_out = extract_text(final, ctype, blob)
-    title = ""
-    if isinstance(text_out, tuple):
-        text, title = text_out
-    else:
-        text = text_out
-        if "html" in (ctype or ""):
-            try:
-                soup = BeautifulSoup(blob, "lxml")
-                if soup.title and soup.title.string:
-                    title = soup.title.string.strip()
-            except Exception:
-                pass
-    return {
-        "url": url,
-        "final_url": final,
-        "http_status": status,
-        "content_type": ctype,
-        "blob": blob,
-        "sha256": hashlib.sha256(blob).hexdigest(),
-        "robots_allowed": 1,
-        "title": title,
-        "text": text or "",
-        "error": None if 200 <= status < 400 else "HTTP %s" % status,
-    }
+    return page_record(url, final, status, ctype, blob)
 
 
 def record_page(conn, run_id, geoid, category, page, archive_id=None):
@@ -683,6 +689,33 @@ def should_follow(url, anchor, depth, category=None):
     return False
 
 
+def follow_targets(source_url, final_url, blob, depth, seed_hosts, name=None,
+                   state=None, category=None):
+    """Links worth queueing from one fetched page, in page order.
+
+    Each entry is (url, preferred); preferred links are documents and
+    obvious rate pages, which every caller puts at the front of its queue.
+    category widens the test for the elections pass, where the useful links
+    are canvasses and results abstracts rather than rate tables.
+    """
+    out = []
+    for href, anchor in html_links(final_url, blob):
+        if not allowed_host(urlparse(href).hostname, seed_hosts, name=name, state=state):
+            continue
+        if should_follow(href, anchor, depth, category) or looks_relevant(source_url):
+            out.append((href, is_document_url(href) or looks_relevant(href, anchor)))
+    return out
+
+
+def seed_hosts_for(urls):
+    hosts = set()
+    for u in urls:
+        host = (urlparse(u).hostname or "").lower()
+        if host:
+            hosts.add(host)
+    return hosts
+
+
 def _has_signal(pages):
     """True if we already pulled a tax document or substantial tax text."""
     for p in pages:
@@ -710,13 +743,62 @@ def _enqueue(queue, seen, url, depth, cap, prefer=False):
     return True
 
 
+def crawlee_enabled(settings):
+    """True when the Crawlee engine is both wanted and importable.
+
+    Crawlee needs Python 3.10+. On an older interpreter the import fails and
+    the legacy loop below runs instead, so the collector still works.
+    """
+    if not store.as_bool(settings.get("use_crawlee", "1")):
+        return False
+    from . import fetcher
+    return fetcher.available()
+
+
 def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
                diag=None):
-    """Catalog first, then search for the county/city site and its documents.
+    """Fetch one work item. Crawlee when available, legacy loop otherwise.
 
     diag, when passed, collects search counters so the caller can tell a
-    genuine empty result from a blocked search engine.
+    genuine empty result from a blocked search engine. Both engines fill the
+    same dict, so a blocked night looks the same whichever one ran.
     """
+    if diag is None:
+        diag = new_diag()
+    if crawlee_enabled(settings):
+        from . import fetcher
+        try:
+            return fetcher.crawl_item(
+                conn, client, settings, run_id, geoid, category, name, state,
+                diag=diag)
+        except fetcher.Unavailable:
+            pass
+    return crawl_item_legacy(
+        conn, client, settings, run_id, geoid, category, name, state, diag=diag)
+
+
+def item_seeds(conn, client, settings, geoid, category, name, state, kind,
+               diag=None):
+    """Catalog URLs first, then web search for the site and its documents.
+
+    The catalog is category-aware: the framework pass starts from statute
+    roots, not from this year's rate table.
+    """
+    seed_urls = seeds_for(conn, geoid, state, settings, category=category)
+    if store.as_bool(settings.get("web_search")):
+        seed_urls.extend(search_web(client, name, state, category, kind=kind,
+                                    settings=settings, diag=diag))
+        # Retry only when every engine refused the first pass. Repeating the
+        # same queries after a genuine zero-result search just burns quota.
+        if not seed_urls and diag is not None and diag.get("blocked"):
+            seed_urls.extend(search_web(client, name, state, category, kind=kind,
+                                        settings=settings, diag=diag))
+    return seed_urls
+
+
+def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, state,
+                      diag=None):
+    """Sequential httpx loop. Fallback when Crawlee is unavailable."""
     import time
 
     if diag is None:
@@ -731,16 +813,9 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
     j = conn.execute("SELECT kind FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     kind = j["kind"] if j else None
 
-    seed_urls = seeds_for(conn, geoid, state, settings, category=category)
-    if do_search:
-        seed_urls.extend(search_web(client, name, state, category, kind=kind,
-                                    settings=settings, diag=diag))
-
-    seed_hosts = set()
-    for u in seed_urls:
-        host = (urlparse(u).hostname or "").lower()
-        if host:
-            seed_hosts.add(host)
+    seed_urls = item_seeds(conn, client, settings, geoid, category, name, state,
+                           kind, diag=diag)
+    seed_hosts = seed_hosts_for(seed_urls)
 
     queue = deque()
     seen = set()
@@ -792,13 +867,10 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
             seed_hosts.add(final_host)
 
         if depth < max_depth and page.get("blob") and "html" in (page.get("content_type") or ""):
-            for href, anchor in html_links(final, page["blob"]):
-                if not allowed_host(urlparse(href).hostname, seed_hosts,
-                                    name=name, state=state):
-                    continue
-                if should_follow(href, anchor, depth, category) or looks_relevant(url):
-                    _enqueue(queue, seen, href, depth + 1, cap,
-                             prefer=is_document_url(href) or looks_relevant(href, anchor))
+            for href, prefer in follow_targets(url, final, page["blob"], depth,
+                                               seed_hosts, name=name, state=state,
+                                               category=category):
+                _enqueue(queue, seen, href, depth + 1, cap, prefer=prefer)
 
     combined = "\n\n-----\n\n".join(texts)
     if len(combined) > max_chars:

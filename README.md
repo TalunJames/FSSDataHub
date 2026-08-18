@@ -30,6 +30,13 @@ python3 -m pip install -r requirements.txt
 python3 -m collector          # http://127.0.0.1:8080
 ```
 
+The crawler runs on [Crawlee](https://crawlee.dev/python/), which needs Python
+3.10+. On an older interpreter it is skipped and the collector falls back to its
+own sequential fetch loop, so the Mac path works either way. The TrueNAS image
+is Python 3.12 and gets the full engine, including a headless browser for the
+county sites that render their rate tables in JavaScript. See
+`collector/README.md`.
+
 Open it, add an AI key under Settings, and press **Start collecting**. It sets
 itself up, loads the free national files, works out each state's rules, then
 works down every county and city by population, re-checking records as they
