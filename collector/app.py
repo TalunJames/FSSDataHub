@@ -147,19 +147,19 @@ def dashboard(request: Request, _: bool = Depends(_auth)):
             "ORDER BY c DESC").fetchall()
     finally:
         conn.close()
-    return templates.TemplateResponse("dashboard.html", _ctx(
+    return templates.TemplateResponse(request, "dashboard.html", _ctx(
         request, recent=recent, queue=queue, nav="dash"))
 
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, _: bool = Depends(_auth)):
-    return templates.TemplateResponse("settings.html", _ctx(request, nav="settings"))
+    return templates.TemplateResponse(request, "settings.html", _ctx(request, nav="settings"))
 
 
 @app.get("/manual", response_class=HTMLResponse)
 def manual_page(request: Request, geoid: str = "", category: str = "",
                 _: bool = Depends(_auth)):
-    return templates.TemplateResponse("manual.html", _ctx(
+    return templates.TemplateResponse(request, "manual.html", _ctx(
         request, nav="manual",
         start_geoid_json=json.dumps(geoid or ""),
         start_category_json=json.dumps(category or "")))
@@ -185,7 +185,7 @@ def review_page(request: Request, _: bool = Depends(_auth)):
                 (r["geoid"], r["category"])).fetchall()
     finally:
         conn.close()
-    return templates.TemplateResponse("review.html", _ctx(
+    return templates.TemplateResponse(request, "review.html", _ctx(
         request, rows=rows, findings=findings, nav="review"))
 
 
@@ -211,7 +211,7 @@ def runs_page(request: Request, run_id: int = None, _: bool = Depends(_auth)):
                 (active,)).fetchall()
     finally:
         conn.close()
-    return templates.TemplateResponse("runs.html", _ctx(
+    return templates.TemplateResponse(request, "runs.html", _ctx(
         request, runs=runs, pages=pages, extracts=extracts, active=active, nav="runs"))
 
 
@@ -236,7 +236,7 @@ def queue_page(request: Request, state: str = "", status: str = "",
             "SELECT DISTINCT state_usps FROM jurisdiction ORDER BY 1")]
     finally:
         conn.close()
-    return templates.TemplateResponse("queue.html", _ctx(
+    return templates.TemplateResponse(request, "queue.html", _ctx(
         request, rows=rows, states=states, filter_state=state.upper(),
         filter_status=status, nav="queue"))
 
