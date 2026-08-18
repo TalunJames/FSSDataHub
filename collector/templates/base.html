@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>{% block title %}Collector{% endblock %} · Tax Database</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -12,12 +13,14 @@
       <p class="mark">Tax Database</p>
       <p class="mark-sub">Collector · TrueNAS</p>
       <nav>
-        <a href="/" class="{{ 'on' if nav=='dash' else '' }}">Dashboard</a>
-        <a href="/queue" class="{{ 'on' if nav=='queue' else '' }}">Work queue</a>
-        <a href="/review" class="{{ 'on' if nav=='review' else '' }}">Review <span class="count">{{ stats.needs_review }}</span></a>
-        <a href="/manual" class="{{ 'on' if nav=='manual' else '' }}">Manual entry</a>
-        <a href="/runs" class="{{ 'on' if nav=='runs' else '' }}">Crawl runs</a>
-        <a href="/settings" class="{{ 'on' if nav=='settings' else '' }}">Keys &amp; crawl</a>
+        <a href="/" class="{{ 'on' if nav=='dash' else '' }}"><span>Dashboard</span></a>
+        <a href="/queue" class="{{ 'on' if nav=='queue' else '' }}"><span>Work queue</span>
+          {% if stats.pending %}<span class="count">{{ stats.pending }}</span>{% endif %}</a>
+        <a href="/review" class="{{ 'on' if nav=='review' else '' }}"><span>Review</span>
+          {% if stats.needs_review %}<span class="count">{{ stats.needs_review }}</span>{% endif %}</a>
+        <a href="/manual" class="{{ 'on' if nav=='manual' else '' }}"><span>Manual entry</span></a>
+        <a href="/runs" class="{{ 'on' if nav=='runs' else '' }}"><span>Crawl runs</span></a>
+        <a href="/settings" class="{{ 'on' if nav=='settings' else '' }}"><span>Keys &amp; crawl</span></a>
       </nav>
       <div class="rail-foot">
         <p class="pulse {{ 'live' if worker.state=='running' else '' }}">
@@ -32,7 +35,7 @@
     </main>
   </div>
   <div id="toast" hidden></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js" defer></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

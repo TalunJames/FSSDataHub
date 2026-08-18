@@ -8,19 +8,19 @@
   </div>
 </header>
 
-<section class="split">
+<section class="split" style="grid-template-columns: 0.9fr 1.1fr">
   <div class="panel">
     <h2>Runs</h2>
     <table>
-      <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th>P/F</th><th>When</th></tr></thead>
+      <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th class="num">P/F</th><th>When</th></tr></thead>
       <tbody>
         {% for r in runs %}
         <tr class="{{ 'on' if r.id==active else '' }}">
           <td><a href="/runs?run_id={{ r.id }}">{{ r.id }}</a></td>
           <td>{{ r.mode }}</td>
-          <td>{{ r.status }}</td>
+          <td><span class="tag" data-v="{{ r.status }}">{{ r.status }}</span></td>
           <td class="num">{{ r.pages_fetched }}/{{ r.findings_written }}</td>
-          <td class="dim">{{ r.started_at }}</td>
+          <td class="ts">{{ (r.started_at or "")[:16] }}</td>
         </tr>
         {% else %}
         <tr><td colspan="5" class="dim">None yet.</td></tr>
@@ -32,13 +32,13 @@
     <div class="panel">
       <h2>Pages{% if active %} · run {{ active }}{% endif %}</h2>
       <table>
-        <thead><tr><th>HTTP</th><th>Title / URL</th><th>Chars</th></tr></thead>
+        <thead><tr><th>HTTP</th><th>Title / URL</th><th class="num">Chars</th></tr></thead>
         <tbody>
           {% for p in pages %}
           <tr>
-            <td>{{ p.http_status or p.error or '—' }}</td>
+            <td class="num">{{ p.http_status or p.error or '—' }}</td>
             <td>
-              <div>{{ p.title or '' }}</div>
+              <div style="color:var(--fg)">{{ p.title or '—' }}</div>
               <a class="dim" href="{{ p.final_url or p.url }}" target="_blank" rel="noopener">{{ p.url }}</a>
               {% if p.robots_allowed == 0 %}<span class="pill">robots</span>{% endif %}
             </td>
@@ -55,7 +55,7 @@
       {% for e in extracts %}
       <article class="extract">
         <p><code>{{ e.geoid }}</code> {{ e.category }} · {{ e.provider }}/{{ e.model }}
-          · {{ 'parsed' if e.parsed_ok else 'failed' }}
+          <span class="tag" data-v="{{ 'complete' if e.parsed_ok else 'error' }}">{{ 'parsed' if e.parsed_ok else 'failed' }}</span>
         </p>
         {% if e.error %}<p class="warn-text">{{ e.error }}</p>{% endif %}
         <pre class="preview">{{ e.preview }}</pre>

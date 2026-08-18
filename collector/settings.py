@@ -44,12 +44,26 @@ DEFAULTS = {
     "openai_base_url": "https://api.openai.com/v1",
     "openai_model": "gpt-4o-mini",
     "anthropic_api_key": "",
-    "anthropic_model": "claude-haiku-4-5",
+    "anthropic_model": "claude-sonnet-5",
     "llama_base_url": "http://host.docker.internal:11434",
     "llama_api_key": "",
     "llama_model": "llama3.1",
     "researcher": "collector",
+    # Second checker: a separate AI pass that sanity-checks each extraction.
+    # Items that pass are marked complete without human review; anything the
+    # checker flags lands on the Review page with the reason.
+    "checker_enabled": "1",
+    "checker_model": "",       # empty = same model as the extractor; with
+                               # Anthropic, claude-haiku-4-5 keeps checks cheap
+    "checker_max_chars": "40000",
 }
+
+# Shown as suggestions in the settings UI; the field stays free-text.
+ANTHROPIC_MODELS = (
+    "claude-sonnet-5",    # recommended: strong extraction at reasonable cost
+    "claude-haiku-4-5",   # cheapest; fine for the checker or simple pages
+    "claude-opus-5",      # deepest reading; slowest and priciest
+)
 
 VALID_KINDS = sorted(JURISDICTION_KINDS)
 VALID_CATEGORIES = sorted(CATEGORIES)

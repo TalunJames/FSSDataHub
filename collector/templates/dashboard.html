@@ -6,12 +6,16 @@
     <h1>Ledger intake</h1>
     <p class="lede">Crawl official sources, extract with an AI or Llama endpoint, or fill gaps by hand. Nothing is client-facing until it is reviewed.</p>
   </div>
+  <div class="row" style="flex:none">
+    <a class="btn" href="/queue">Work queue</a>
+    <a class="btn primary-link" href="/manual">Manual entry</a>
+  </div>
 </header>
 
 {% if not stats.ready %}
 <section class="panel warn">
   <h2>Database is empty</h2>
-  <p>Seed the Census jurisdiction registry before crawling. This downloads Gazetteer and population files (no Census API key) and takes a few minutes.</p>
+  <p class="hint">Seed the Census jurisdiction registry before crawling. This downloads Gazetteer and population files (no Census API key) and takes a few minutes.</p>
   <div class="row">
     <button data-action="init">Initialize schema</button>
     <button class="primary" data-action="seed">Seed jurisdictions</button>
@@ -26,16 +30,22 @@
   <article><span class="k">Work items</span><strong id="stat-work">{{ stats.work_items }}</strong></article>
   <article><span class="k">Pending</span><strong id="stat-pending">{{ stats.pending }}</strong></article>
   <article><span class="k">Needs review</span><strong id="stat-review">{{ stats.needs_review }}</strong></article>
+  <article><span class="k">Done</span><strong id="stat-done">{{ stats.done }}</strong></article>
+  <article><span class="k">Auto-verified</span><strong id="stat-verified">{{ stats.auto_verified }}</strong></article>
   <article><span class="k">Tax records</span><strong id="stat-instruments">{{ stats.instruments }}</strong></article>
   <article><span class="k">Pages archived</span><strong id="stat-pages">{{ stats.pages }}</strong></article>
 </section>
 
+{% if stats.work_items %}
+<section class="panel progress-panel">
+  <div class="progressbar"><div class="progressbar-fill" id="progress-fill" style="width: {{ stats.pct_done }}%"></div></div>
+  <p class="hint" id="progress-line">{{ stats.done }} of {{ stats.work_items }} items researched ({{ stats.pct_done }}%) · {{ stats.needs_review }} flagged for review · {{ stats.pending }} pending</p>
+</section>
+{% endif %}
+
 <section class="split">
   <div class="panel">
     <h2>Crawl control</h2>
-    <p class="hint">Provider: <code>{{ settings.provider }}</code>
-      {% if settings.provider == 'none' %} — pages will be archived; findings wait for manual entry or an AI key.{% endif %}
-    </p>
     <div class="controls">
       <label class="switch">
         <input type="checkbox" id="toggle-continuous" {% if settings.continuous_enabled == '1' %}checked{% endif %}>
@@ -50,9 +60,18 @@
     <p class="hint" id="worker-line">
       {% if worker.current_name %}Working {{ worker.current_name }}{% elif worker.message %}{{ worker.message }}{% else %}Idle.{% endif %}
     </p>
-    <p class="hint">Schedule is {{ 'on' if settings.schedule_enabled == '1' else 'off' }}
-      ({{ settings.schedule_kind }}{% if settings.schedule_kind in ['daily','weekly'] %} at {{ settings.schedule_time }}{% endif %}).
-      Change it under Keys &amp; crawl.
+    <table style="margin-top:.7rem">
+      <tbody>
+        <tr><td>Provider</td><td class="num"><code>{{ settings.provider }}</code></td></tr>
+        <tr><td>Schedule</td><td class="num">
+          <span class="tag" data-v="{{ 'running' if settings.schedule_enabled == '1' else 'off' }}">{{ 'on' if settings.schedule_enabled == '1' else 'off' }}</span>
+          {{ settings.schedule_kind }}{% if settings.schedule_kind in ['daily','weekly'] %} · {{ settings.schedule_time }} UTC{% endif %}
+        </td></tr>
+      </tbody>
+    </table>
+    <p class="hint" style="margin-top:.6rem">
+      {% if settings.provider == 'none' %}Provider is <code>none</code>: pages are archived, findings wait for manual entry or an AI key. {% endif %}
+      Change both under <a href="/settings">Keys &amp; crawl</a>.
     </p>
   </div>
 
@@ -63,74 +82,87 @@
       <label>States <span class="dim">USPS, space or comma</span>
         <input name="states" placeholder="OH MI PA" required>
       </label>
-      <label>Kinds
-        <input name="kinds" value="county,place,state">
-      </label>
-      <label>Categories
-        <input name="categories" value="{{ settings.filter_categories }}">
-      </label>
+      <div class="row">
+        <label>Kinds <input name="kinds" value="county,place,state"></label>
+        <label>Categories <input name="categories" value="{{ settings.filter_categories }}"></label>
+      </div>
       <div class="row">
         <label>Min population <input type="number" name="min_pop" value="0"></label>
         <label>Limit <input type="number" name="limit" placeholder="all"></label>
+        <button class="primary" type="submit" style="flex:none">Plan work</button>
       </div>
-      <button class="primary" type="submit">Plan work</button>
     </form>
   </div>
 </section>
 
 <section class="panel">
-  <h2>Bulk files (no model)</h2>
+  <h2>Bulk files · no model required</h2>
   <p class="hint">Run these before crawling. SST covers sales tax in 24 states. Census of Governments is a levy/no-levy prior. Statutes feed research packets.</p>
   <div class="row">
-    <button class="primary" data-action="sst">Load SST rate files</button>
-    <input id="sst-states" placeholder="OH WA (empty = all 24)" style="max-width:14rem">
+    <div class="burst">
+      <input id="sst-states" placeholder="OH WA (empty = all 24)" style="width:14rem">
+      <button class="primary" data-action="sst">Load SST rates</button>
+    </div>
     <button data-action="cog">Load Census of Governments 2022</button>
+    <div class="burst">
+      <input id="statute-state" placeholder="OH" maxlength="2" style="width:3.5rem;text-transform:uppercase">
+      <button data-action="statutes">Fetch Open US Law statutes</button>
+    </div>
   </div>
-  <div class="row" style="margin-top:.75rem">
-    <input id="statute-state" placeholder="OH" maxlength="2" style="max-width:4rem;text-transform:uppercase">
-    <button data-action="statutes">Fetch Open US Law statutes</button>
+</section>
+
+<section class="split">
+  <div class="panel">
+    <h2>Queue by status</h2>
+    {% if queue %}
+    <table>
+      <thead><tr><th>Status</th><th class="num">Items</th></tr></thead>
+      <tbody>
+        {% for r in queue %}
+        <tr>
+          <td><a href="/queue?status={{ r.status }}"><span class="tag" data-v="{{ r.status }}">{{ r.status }}</span></a></td>
+          <td class="num">{{ r.c }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="hint">No work planned yet.</p>
+    {% endif %}
+  </div>
+
+  <div class="panel">
+    <h2>Manual entry</h2>
+    <p class="hint">Crawlers miss ordinances and screenshots. Drop a URL, PDF, or photo for the AI, or answer only the questions still open — with skip on every one.</p>
+    <div class="row">
+      <a class="btn primary-link" href="/manual">Open manual entry</a>
+      {% if stats.needs_review %}
+      <a class="btn" href="/review">{{ stats.needs_review }} waiting in review</a>
+      {% endif %}
+    </div>
   </div>
 </section>
 
 <section class="panel">
-  <h2>Manual entry</h2>
-  <p class="hint">Crawlers miss ordinances and screenshots. Drop a URL, PDF, or photo for the AI, or answer only the questions still open — with skip on every one.</p>
-  <a class="btn primary-link" href="/manual">Open manual entry</a>
-  {% if stats.needs_review %}
-  <span class="dim"> {{ stats.needs_review }} item(s) waiting in review, which can jump straight into the interview.</span>
-  {% endif %}
-</section>
-
-<section class="panel">
-  <h2>Queue by status</h2>
-  {% if queue %}
-  <table>
-    <thead><tr><th>Status</th><th>Items</th></tr></thead>
-    <tbody>
-      {% for r in queue %}
-      <tr><td><a href="/queue?status={{ r.status }}">{{ r.status }}</a></td><td class="num">{{ r.c }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="hint">No work planned yet.</p>
-  {% endif %}
+  <h2>Notifications</h2>
+  <p class="hint">Failed runs, failed uploads, and anything the second checker flagged. Auto-refreshes.</p>
+  <ul class="activity" id="activity-list"><li class="dim">Loading…</li></ul>
 </section>
 
 <section class="panel">
   <h2>Recent runs</h2>
   <table>
-    <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th>Items</th><th>Pages</th><th>Findings</th><th>Started</th></tr></thead>
+    <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th class="num">Items</th><th class="num">Pages</th><th class="num">Findings</th><th>Started</th></tr></thead>
     <tbody>
       {% for r in recent %}
       <tr>
         <td><a href="/runs?run_id={{ r.id }}">{{ r.id }}</a></td>
         <td>{{ r.mode }}</td>
-        <td>{{ r.status }}</td>
+        <td><span class="tag" data-v="{{ r.status }}">{{ r.status }}</span></td>
         <td class="num">{{ r.items_claimed }}</td>
         <td class="num">{{ r.pages_fetched }}</td>
         <td class="num">{{ r.findings_written }}</td>
-        <td class="dim">{{ r.started_at }}</td>
+        <td class="ts">{{ (r.started_at or "")[:16] }}</td>
       </tr>
       {% else %}
       <tr><td colspan="7" class="dim">No crawls yet.</td></tr>

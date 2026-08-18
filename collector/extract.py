@@ -59,36 +59,56 @@ def parse_json_payload(text):
         raise ExtractError("model did not return JSON: %s" % exc)
 
 
-def extract(settings, packet_text, documents_text, researcher="collector", images=None):
+def default_model(settings, provider=None):
+    provider = provider or (settings.get("provider") or "none").strip().lower()
+    if provider == "openai":
+        return settings.get("openai_model") or "gpt-4o-mini"
+    if provider == "anthropic":
+        return settings.get("anthropic_model") or "claude-sonnet-5"
+    if provider == "llama":
+        return settings.get("llama_model") or "llama3.1"
+    return None
+
+
+def chat(settings, prompt, system=SYSTEM, images=None, model=None):
+    """One completion against the configured provider.
+
+    Returns (raw_text, error). model overrides the provider's default —
+    the second checker uses this to run a different (cheaper) model.
+    """
     provider = (settings.get("provider") or "none").strip().lower()
     if provider in ("", "none"):
-        return None, None, "no AI provider configured"
-    prompt = _user_prompt(packet_text, documents_text)
+        return None, "no AI provider configured"
     images = images or []
-    model = None
+    model = model or default_model(settings, provider)
     try:
         if provider == "openai":
-            model = settings.get("openai_model") or "gpt-4o-mini"
             raw = _openai_compat(
                 (settings.get("openai_base_url") or "https://api.openai.com/v1").rstrip("/"),
                 settings.get("openai_api_key") or "",
-                model, prompt, images=images)
+                model, prompt, images=images, system=system)
         elif provider == "anthropic":
-            model = settings.get("anthropic_model") or "claude-haiku-4-5"
             raw = _anthropic(settings.get("anthropic_api_key") or "", model, prompt,
-                             images=images)
+                             images=images, system=system)
         elif provider == "llama":
-            model = settings.get("llama_model") or "llama3.1"
             raw = _llama(
                 (settings.get("llama_base_url") or "http://127.0.0.1:11434").rstrip("/"),
                 settings.get("llama_api_key") or "",
-                model, prompt, images=images)
+                model, prompt, images=images, system=system)
         else:
-            return None, None, "unknown provider %r" % provider
+            return None, "unknown provider %r" % provider
     except ExtractError as exc:
-        return None, None, str(exc)
+        return None, str(exc)
     except httpx.HTTPError as exc:
-        return None, None, "provider HTTP error: %s" % exc
+        return None, "provider HTTP error: %s" % exc
+    return raw, None
+
+
+def extract(settings, packet_text, documents_text, researcher="collector", images=None):
+    prompt = _user_prompt(packet_text, documents_text)
+    raw, err = chat(settings, prompt, images=images)
+    if err:
+        return None, None, err
 
     try:
         doc = parse_json_payload(raw)
@@ -133,7 +153,7 @@ def _b64(blob):
     return base64.b64encode(blob).decode("ascii")
 
 
-def _openai_compat(base_url, api_key, model, prompt, images=None):
+def _openai_compat(base_url, api_key, model, prompt, images=None, system=SYSTEM):
     url = base_url
     if not url.endswith("/chat/completions"):
         url = base_url.rstrip("/") + "/chat/completions"
@@ -154,7 +174,7 @@ def _openai_compat(base_url, api_key, model, prompt, images=None):
         "model": model,
         "temperature": 0.1,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ],
     }
@@ -169,7 +189,7 @@ def _openai_compat(base_url, api_key, model, prompt, images=None):
         raise ExtractError("unexpected OpenAI-compatible response")
 
 
-def _anthropic(api_key, model, prompt, images=None):
+def _anthropic(api_key, model, prompt, images=None, system=SYSTEM):
     if not api_key:
         raise ExtractError("Anthropic API key is empty")
     headers = {
@@ -192,7 +212,7 @@ def _anthropic(api_key, model, prompt, images=None):
         "model": model,
         "max_tokens": 8192,
         "system": [
-            {"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
         ],
         "messages": [{"role": "user", "content": content}],
     }
@@ -210,7 +230,7 @@ def _anthropic(api_key, model, prompt, images=None):
     return "\n".join(parts)
 
 
-def _llama(base_url, api_key, model, prompt, images=None):
+def _llama(base_url, api_key, model, prompt, images=None, system=SYSTEM):
     """Prefer Ollama native /api/chat; fall back to OpenAI-compatible."""
     native = base_url
     if native.endswith("/v1"):
@@ -228,7 +248,7 @@ def _llama(base_url, api_key, model, prompt, images=None):
         "model": model,
         "stream": False,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system},
             msg,
         ],
         "options": {"temperature": 0.1},
@@ -244,4 +264,4 @@ def _llama(base_url, api_key, model, prompt, images=None):
         except httpx.HTTPError:
             pass
         return _openai_compat(native.rstrip("/") + "/v1", api_key, model, prompt,
-                              images=images)
+                              images=images, system=system)
