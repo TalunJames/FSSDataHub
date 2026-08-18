@@ -84,6 +84,24 @@ def export_all(conn, outdir=None, states=None):
     written["coverage_assertions.csv"] = _dump(
         conn, "SELECT * FROM coverage_assertion ORDER BY domain, scope_geoid", [],
         os.path.join(outdir, "coverage_assertions.csv"))
+    written["thresholds.csv"] = _dump(
+        conn,
+        "SELECT * FROM threshold_rule %s ORDER BY state_usps, measure_class"
+        % ("WHERE state_usps IN (%s)" % ",".join("?" * len(states)) if states else ""),
+        [s.upper() for s in states] if states else [],
+        os.path.join(outdir, "thresholds.csv"))
+    written["authority_caps.csv"] = _dump(
+        conn,
+        "SELECT * FROM authority_grant %s ORDER BY state_usps, category, instrument_code"
+        % ("WHERE state_usps IN (%s)" % ",".join("?" * len(states)) if states else ""),
+        [s.upper() for s in states] if states else [],
+        os.path.join(outdir, "authority_caps.csv"))
+    written["headroom.csv"] = _dump(
+        conn,
+        "SELECT * FROM v_headroom %s ORDER BY population DESC"
+        % ("WHERE state_usps IN (%s)" % ",".join("?" * len(states)) if states else ""),
+        [s.upper() for s in states] if states else [],
+        os.path.join(outdir, "headroom.csv"))
     written["ballot_measures.csv"] = _dump(
         conn,
         "SELECT b.*, j.name AS jurisdiction, j.state_usps FROM ballot_measure b "

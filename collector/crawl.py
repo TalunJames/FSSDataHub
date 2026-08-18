@@ -27,7 +27,18 @@ RELEVANT = re.compile(
     r"tax|levy|levies|millage|ordinance|lodging|hotel|motel|occupancy|"
     r"sales.?tax|property.?tax|excise|assessment|revenue|franchise|"
     r"transient|meals|rate.?table|local.?option|withholding|earnings.?tax|"
-    r"statute|municipal.?code|charter",
+    r"statute|municipal.?code|charter|"
+    # Election documents: where ballot_measure data actually lives.
+    r"ballot|measure|canvass|election|proposition|referend|abstract.?of.?votes|"
+    r"official.?results|certif",
+    re.I,
+)
+
+# Election-results pages are often titled with none of the tax words above,
+# so the elections pass gets its own follow test.
+ELECTION_RELEVANT = re.compile(
+    r"ballot|measure|canvass|election|proposition|referend|levy|bond|"
+    r"abstract|official.?results|certif|precinct|sample.?ballot|issue",
     re.I,
 )
 
@@ -71,7 +82,7 @@ def client_for(settings):
     )
 
 
-def seeds_for(conn, geoid, state_usps, settings):
+def seeds_for(conn, geoid, state_usps, settings, category=None):
     """Official starting URLs for one jurisdiction."""
     j = conn.execute("SELECT * FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     urls = []
@@ -84,6 +95,15 @@ def seeds_for(conn, geoid, state_usps, settings):
         if url not in seen:
             seen.add(url)
             urls.append(url)
+
+    if category == "framework":
+        # Statute text and the agency of record, not this year's rate table.
+        row = conn.execute(
+            "SELECT statute_root_url, revenue_agency_url FROM state_profile "
+            "WHERE state_usps=?", ((state_usps or "").upper(),)).fetchone()
+        if row:
+            add(row["statute_root_url"])
+            add(row["revenue_agency_url"])
 
     if j:
         for row in conn.execute(
@@ -100,7 +120,29 @@ def seeds_for(conn, geoid, state_usps, settings):
 
 
 def search_queries(name, state, category, kind=None):
-    """Queries that find the jurisdiction site, then the rate PDF on it."""
+    """Queries that find the jurisdiction site, then the document on it.
+
+    Query wording is category-specific because the three passes look for
+    different documents: rate tables, statute chapters, and canvasses are not
+    found by the same words.
+    """
+    if category == "framework":
+        return [
+            "%s state code local sales tax authority maximum rate" % state,
+            "%s statute two-thirds vote local tax measure" % state,
+            "%s constitution property tax levy limit local government" % state,
+            "%s secretary of state local ballot measure requirements" % state,
+            "%s code lodging tax county municipality maximum" % state,
+            "%s legislature revenue title local option taxes" % state,
+        ]
+    if category == "elections":
+        return [
+            '"%s" %s board of elections official results canvass' % (name, state),
+            '"%s" %s election results levy bond measure' % (name, state),
+            '"%s" %s abstract of votes filetype:pdf' % (name, state),
+            '"%s" %s county clerk elections past results' % (name, state),
+            '"%s" %s ballot measure results site:.gov' % (name, state),
+        ]
     cat = (category or "tax").replace("_", " ")
     kind_word = KIND_WORD.get(kind or "", "government")
     return [
@@ -112,19 +154,60 @@ def search_queries(name, state, category, kind=None):
     ]
 
 
-def search_gov(client, name, state, category, kind=None, limit=12):
-    """Web search for official pages and PDFs. DuckDuckGo, Bing if empty."""
-    return search_web(client, name, state, category, kind=kind, limit=limit)
+def search_gov(client, name, state, category, kind=None, limit=12, settings=None,
+               diag=None):
+    """Web search for official pages and PDFs."""
+    return search_web(client, name, state, category, kind=kind, limit=limit,
+                      settings=settings, diag=diag)
 
 
-def search_web(client, name, state, category, kind=None, limit=12):
-    """Find the county/city site and tax PDFs. Failures are silent."""
+def new_diag():
+    """Counters for one item's searching, so a blocked engine is visible.
+
+    Without this, 'searched and found nothing' and 'search engine refused to
+    answer' produce the same empty page list, and a throttled night looks the
+    same as a thorough one.
+    """
+    return {"queries": 0, "answered": 0, "blocked": 0, "hits": 0,
+            "kept": 0, "provider": None}
+
+
+def search_web(client, name, state, category, kind=None, limit=12, settings=None,
+               diag=None):
+    """Find official pages and documents. Failures are counted, not silent."""
+    settings = settings or {}
+    diag = diag if diag is not None else new_diag()
+    api_key = (settings.get("search_api_key") or "").strip()
+    provider = (settings.get("search_provider") or "auto").strip().lower()
+    if provider == "auto":
+        provider = "brave" if api_key else "scrape"
+    diag["provider"] = provider
+
     out = []
     seen = set()
     for q in search_queries(name, state, category, kind):
-        hits = _ddg_search(client, q, limit=8)
-        if not hits:
-            hits = _bing_search(client, q, limit=8)
+        diag["queries"] += 1
+        engines = []
+        if provider == "brave" and api_key:
+            engines.append(lambda: _brave_search(client, api_key, q, limit=8))
+        engines.append(lambda: _ddg_search(client, q, limit=8))
+        engines.append(lambda: _bing_search(client, q, limit=8))
+
+        hits, refusals = [], 0
+        for engine in engines:
+            got, refused = engine()
+            refusals += 1 if refused else 0
+            if got:
+                hits = got
+                break
+        # Only a query that every engine refused counts as blocked. One engine
+        # answering with a genuine zero is a real (if unhelpful) answer.
+        blocked = not hits and refusals == len(engines)
+        if hits:
+            diag["answered"] += 1
+        elif blocked:
+            diag["blocked"] += 1
+        diag["hits"] += len(hits)
         for url in hits:
             if url in seen:
                 continue
@@ -133,12 +216,64 @@ def search_web(client, name, state, category, kind=None, limit=12):
                 continue
             seen.add(url)
             out.append(url)
+            diag["kept"] += 1
             if len(out) >= limit:
                 return out
     return out
 
 
+def search_note(diag):
+    """One line for the run log, or None when searching went fine."""
+    if not diag or not diag.get("queries"):
+        return None
+    if diag["blocked"] and not diag["answered"]:
+        return ("web search blocked: %d of %d queries refused by %s — findings "
+                "for this item were made without search"
+                % (diag["blocked"], diag["queries"], diag.get("provider") or "search"))
+    if diag["blocked"]:
+        return "web search partly blocked: %d of %d queries refused" % (
+            diag["blocked"], diag["queries"])
+    if not diag["hits"]:
+        return "web search returned no results for %d queries" % diag["queries"]
+    return None
+
+
+def _brave_search(client, api_key, query, limit=8):
+    """Brave Search API. Returns (urls, blocked)."""
+    try:
+        r = client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": limit},
+            headers={"Accept": "application/json",
+                     "X-Subscription-Token": api_key},
+            timeout=20.0,
+        )
+    except httpx.HTTPError:
+        return [], True
+    if r.status_code in (401, 403):
+        return [], True
+    if r.status_code == 429:
+        return [], True
+    if r.status_code >= 400:
+        return [], True
+    try:
+        data = r.json()
+    except ValueError:
+        return [], True
+    out = []
+    for hit in ((data.get("web") or {}).get("results") or []):
+        url = hit.get("url")
+        if url and url not in out:
+            out.append(url)
+        if len(out) >= limit:
+            break
+    return out, False
+
+
 def _ddg_search(client, query, limit=8):
+    """Returns (urls, blocked). A scraped SERP that answers with a challenge
+    page looks like success at the HTTP layer, so an empty parse counts as
+    blocked rather than as a genuine zero."""
     try:
         r = client.get(
             "https://html.duckduckgo.com/html/",
@@ -147,7 +282,7 @@ def _ddg_search(client, query, limit=8):
         )
         r.raise_for_status()
     except httpx.HTTPError:
-        return []
+        return [], True
     soup = BeautifulSoup(r.text, "lxml")
     out = []
     for a in soup.select("a.result__a, a.result-link, a"):
@@ -162,10 +297,11 @@ def _ddg_search(client, query, limit=8):
             out.append(target)
         if len(out) >= limit:
             break
-    return out
+    return out, not out
 
 
 def _bing_search(client, query, limit=8):
+    """Returns (urls, blocked)."""
     try:
         r = client.get(
             "https://www.bing.com/search",
@@ -174,7 +310,7 @@ def _bing_search(client, query, limit=8):
         )
         r.raise_for_status()
     except httpx.HTTPError:
-        return []
+        return [], True
     soup = BeautifulSoup(r.text, "lxml")
     out = []
     for a in soup.select("li.b_algo h2 a, a[href]"):
@@ -189,7 +325,7 @@ def _bing_search(client, query, limit=8):
             out.append(href)
         if len(out) >= limit:
             break
-    return out
+    return out, not out
 
 
 def _unwrap_ddg(href):
@@ -535,10 +671,12 @@ DEPT = re.compile(
 )
 
 
-def should_follow(url, anchor, depth):
+def should_follow(url, anchor, depth, category=None):
     if is_document_url(url):
         return True
     if looks_relevant(url, anchor):
+        return True
+    if category == "elections" and ELECTION_RELEVANT.search("%s %s" % (url, anchor or "")):
         return True
     if depth == 0 and DEPT.search("%s %s" % (url, anchor or "")):
         return True
@@ -572,10 +710,17 @@ def _enqueue(queue, seen, url, depth, cap, prefer=False):
     return True
 
 
-def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
-    """Catalog first, then search for the county/city site and tax PDFs."""
+def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
+               diag=None):
+    """Catalog first, then search for the county/city site and its documents.
+
+    diag, when passed, collects search counters so the caller can tell a
+    genuine empty result from a blocked search engine.
+    """
     import time
 
+    if diag is None:
+        diag = new_diag()
     delay = store.as_float(settings.get("delay_seconds"), 2.0)
     max_pages = store.as_int(settings.get("max_pages_per_item"), 16)
     max_depth = store.as_int(settings.get("max_depth"), 3)
@@ -586,11 +731,10 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
     j = conn.execute("SELECT kind FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     kind = j["kind"] if j else None
 
-    seed_urls = seeds_for(conn, geoid, state, settings)
+    seed_urls = seeds_for(conn, geoid, state, settings, category=category)
     if do_search:
-        seed_urls.extend(search_web(client, name, state, category, kind=kind))
-    if not seed_urls and do_search:
-        seed_urls.extend(search_web(client, name, state, category, kind=kind))
+        seed_urls.extend(search_web(client, name, state, category, kind=kind,
+                                    settings=settings, diag=diag))
 
     seed_hosts = set()
     for u in seed_urls:
@@ -613,7 +757,8 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
             if extra_search or not do_search or _has_signal(pages):
                 break
             extra_search = True
-            for u in search_web(client, name, state, category, kind=kind, limit=16):
+            for u in search_web(client, name, state, category, kind=kind, limit=16,
+                                settings=settings, diag=diag):
                 host = (urlparse(u).hostname or "").lower()
                 if host:
                     seed_hosts.add(host)
@@ -651,7 +796,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
                 if not allowed_host(urlparse(href).hostname, seed_hosts,
                                     name=name, state=state):
                     continue
-                if should_follow(href, anchor, depth) or looks_relevant(url):
+                if should_follow(href, anchor, depth, category) or looks_relevant(url):
                     _enqueue(queue, seen, href, depth + 1, cap,
                              prefer=is_document_url(href) or looks_relevant(href, anchor))
 

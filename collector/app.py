@@ -12,21 +12,22 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from taxdb import db, ingest, ledger
+from taxdb import db, export, ingest, ledger
 from taxdb.vocab import (
-    CATEGORIES, CONFIDENCE, EXTRACTION_METHODS, INSTRUMENTS, RATE_UNITS,
-    SOURCE_TYPES, STATUSES, TERNARY, WORK_STATUSES,
+    CATEGORIES, CONFIDENCE, ELECTIONS, EXTRACTION_METHODS, FRAMEWORK,
+    INSTRUMENTS, RATE_UNITS, SOURCE_TYPES, STATUSES, TERNARY, WORK_CATEGORIES,
+    WORK_STATUSES,
 )
 
-from . import crawl, extract, intake, interview, store, worker
+from . import autopilot, crawl, extract, intake, interview, store, worker
 from .settings import (
-    ANTHROPIC_MODELS, VALID_KINDS, VALID_PROVIDERS, VALID_SCHEDULE,
+    ANTHROPIC_MODELS, VALID_KINDS, VALID_PROVIDERS, VALID_SCHEDULE, VALID_SEARCH,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
 
-app = FastAPI(title="Tax Database Collector", version="0.3.0")
+app = FastAPI(title="Tax Database Collector", version="0.4.0")
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
 
 security = HTTPBasic(auto_error=False)
@@ -76,15 +77,22 @@ def _ctx(request, **extra):
     try:
         settings = store.get_all(conn)
         stats = _stats(conn)
+        progress = autopilot.progress(conn, settings) if stats["ready"] else None
     finally:
         conn.close()
     ctx = {
         "request": request,
         "settings": store.mask(settings),
         "stats": stats,
+        "progress": progress,
+        "running": store.as_bool(settings.get("continuous_enabled")),
+        "collecting": _collecting_line(settings, stats, worker.snapshot()),
+        "blockers": _blockers(settings, stats),
         "worker": worker.snapshot(),
         "categories": CATEGORIES,
+        "work_categories": WORK_CATEGORIES,
         "instruments": INSTRUMENTS,
+        "searches": VALID_SEARCH,
         "statuses": sorted(STATUSES),
         "rate_units": sorted(RATE_UNITS),
         "source_types": sorted(SOURCE_TYPES),
@@ -131,12 +139,14 @@ def _stats(conn):
             "WHERE verdict='pass' GROUP BY geoid, category)")
     except Exception:
         auto_verified = 0
+    blocked = n("SELECT COUNT(*) FROM work_item WHERE status='blocked'") if tot else 0
     return {
         "jurisdictions": n_j,
         "work_items": tot,
         "pending": pending,
         "in_progress": in_progress,
         "needs_review": review,
+        "blocked": blocked,
         "done": done,
         "pct_done": round(100.0 * done / tot, 1) if tot else 0,
         "auto_verified": auto_verified,
@@ -149,19 +159,142 @@ def _stats(conn):
     }
 
 
+def _blockers(settings, stats):
+    """The short list of things stopping unattended collection.
+
+    One decision each, in the order they matter. The home page shows the first
+    one and nothing else, so a new user is never looking at four problems.
+    """
+    out = []
+    if not stats["ready"]:
+        out.append({
+            "id": "seed",
+            "title": "Set up the database",
+            "detail": "Downloads the Census list of every US county and city. "
+                      "Takes a few minutes and only happens once.",
+            "action": "Set up and start",
+        })
+        return out
+    if (settings.get("provider") or "none") == "none":
+        out.append({
+            "id": "provider",
+            "title": "Add an AI key so it can read documents",
+            "detail": "Without one, pages are downloaded and filed but nobody "
+                      "reads them, so no rates get recorded.",
+            "action": "Open settings",
+            "href": "/settings",
+        })
+    return out
+
+
+def _collecting_line(settings, stats, snap):
+    """One sentence: what the collector is doing right now.
+
+    Paused is checked before the current step, otherwise the page keeps
+    reporting the job that was in flight when someone hit pause as though it
+    were still starting new work.
+    """
+    running = store.as_bool(settings.get("continuous_enabled"))
+    busy = snap.get("state") == "running"
+    if not running:
+        if busy:
+            return "Finishing the current item, then stopping"
+        return "Paused. Nothing is being collected."
+    if snap.get("state") == "error":
+        return snap.get("message") or "Something went wrong"
+    if snap.get("step"):
+        return snap["step"]
+    if snap.get("current_name"):
+        return "Working on %s" % snap["current_name"]
+    if snap.get("message"):
+        return snap["message"]
+    return "Starting up"
+
+
+# Full-table counts for the data page only. These are scans, so they stay off
+# the status poll that the home page hits every couple of seconds.
+COUNTED_TABLES = (
+    "tax_instrument", "ballot_measure", "threshold_rule", "authority_grant",
+    "revenue_base", "statute_section", "coverage_assertion", "claim_source",
+    "rate_change_event", "archive_file",
+)
+
+
+def _table_counts(conn):
+    counts = {}
+    for table in COUNTED_TABLES:
+        try:
+            counts[table] = conn.execute(
+                "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+        except Exception:
+            counts[table] = 0
+    return counts
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, _: bool = Depends(_auth)):
     conn = store.connect()
     try:
         recent = conn.execute(
-            "SELECT * FROM crawl_run ORDER BY id DESC LIMIT 12").fetchall()
-        queue = conn.execute(
-            "SELECT status, COUNT(*) c FROM work_item GROUP BY status "
-            "ORDER BY c DESC").fetchall()
+            "SELECT id, mode, status, items_claimed, findings_written, started_at "
+            "FROM crawl_run ORDER BY id DESC LIMIT 5").fetchall()
+        next_up = None
+        settings = store.get_all(conn)
+        if _stats(conn)["ready"]:
+            plan = autopilot.next_action(conn, settings)
+            next_up = plan[2] if plan else None
     finally:
         conn.close()
     return templates.TemplateResponse(request, "dashboard.html", _ctx(
-        request, recent=recent, queue=queue, nav="dash"))
+        request, recent=recent, next_up=next_up, nav="dash"))
+
+
+@app.get("/data", response_class=HTMLResponse)
+def data_page(request: Request, _: bool = Depends(_auth)):
+    """What the database actually holds, and which parts are still empty."""
+    conn = store.connect()
+    try:
+        counts = _table_counts(conn)
+
+        def rows(sql, params=()):
+            try:
+                return conn.execute(sql, params).fetchall()
+            except Exception:
+                return []
+
+        sunset = rows(
+            "SELECT state_usps, name, kind, category, instrument_code, rate_value, "
+            "rate_unit, expiration_date, days_out, prior_revenue_measures, "
+            "best_prior_yes FROM v_sunset_watch LIMIT 25")
+        near_miss = rows(
+            "SELECT state_usps, name, election_date, measure_id_local, measure_class, "
+            "pct_yes, threshold_required, margin_vs_threshold, stated_purpose "
+            "FROM v_near_miss LIMIT 25")
+        headroom = rows(
+            "SELECT state_usps, name, kind, category, instrument_code, max_rate, "
+            "max_rate_unit, levied_rate, headroom FROM v_headroom "
+            "WHERE headroom > 0 ORDER BY population DESC LIMIT 25")
+        gap = rows(
+            "SELECT state_usps, name, category, instrument_code, change_type, "
+            "rate_before, rate_after, effective_period FROM v_measure_capture_gap "
+            "LIMIT 25")
+        by_state = rows(
+            "SELECT j.state_usps AS st, COUNT(*) AS n, "
+            "SUM(w.status='complete') AS done, "
+            "SUM(w.status='needs_review') AS review, "
+            "SUM(w.status='pending') AS pending, "
+            "SUM(w.status='blocked') AS blocked "
+            "FROM work_item w JOIN jurisdiction j ON j.geoid=w.geoid "
+            "GROUP BY j.state_usps ORDER BY j.state_usps")
+        coverage_rows = rows(
+            "SELECT completeness, COUNT(*) c FROM coverage_assertion "
+            "WHERE domain='ballot_measure' GROUP BY completeness ORDER BY 2 DESC")
+    finally:
+        conn.close()
+    return templates.TemplateResponse(request, "data.html", _ctx(
+        request, counts=counts, sunset=sunset, near_miss=near_miss,
+        headroom=headroom, gap=gap, by_state=by_state,
+        coverage_rows=coverage_rows, nav="data"))
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -188,18 +321,48 @@ def review_page(request: Request, _: bool = Depends(_auth)):
             "FROM work_item w JOIN jurisdiction j ON j.geoid=w.geoid "
             "WHERE w.status='needs_review' ORDER BY w.priority DESC LIMIT 80"
         ).fetchall()
-        findings = {}
+        # Each pass wrote to a different table, so each needs its own view of
+        # what is waiting. Showing "no tax rows" on a threshold item told a
+        # reviewer nothing and left them no way to judge it.
+        findings, measures, framework = {}, {}, {}
         for r in rows[:40]:
-            findings[r["geoid"] + "/" + r["category"]] = conn.execute(
-                "SELECT t.id, t.instrument_code, t.status, t.rate_value, t.rate_unit, "
-                "t.confidence, t.extraction_method, t.retrieved_at, s.url "
-                "FROM tax_instrument t JOIN source s ON s.id=t.source_id "
-                "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL",
-                (r["geoid"], r["category"])).fetchall()
+            key = r["geoid"] + "/" + r["category"]
+            if r["category"] == ELECTIONS:
+                measures[key] = conn.execute(
+                    "SELECT b.id, b.election_date, b.measure_id_local, b.measure_class, "
+                    "b.outcome, b.pct_yes, b.threshold_required, b.margin_vs_threshold, "
+                    "b.rate_value, b.rate_unit, b.stated_purpose, b.confidence, s.url "
+                    "FROM ballot_measure b LEFT JOIN source s ON s.id=b.source_id "
+                    "WHERE b.geoid=? AND b.superseded_by IS NULL "
+                    "ORDER BY b.election_date DESC LIMIT 25", (r["geoid"],)).fetchall()
+            elif r["category"] == FRAMEWORK:
+                usps = r["state_usps"]
+                framework[key] = {
+                    "thresholds": conn.execute(
+                        "SELECT t.measure_class, t.jurisdiction_kind, "
+                        "t.purpose_restriction, t.threshold_value, t.threshold_basis, "
+                        "t.statute_cite, t.confidence, s.url FROM threshold_rule t "
+                        "LEFT JOIN source s ON s.id=t.source_id WHERE t.state_usps=? "
+                        "ORDER BY t.measure_class LIMIT 25", (usps,)).fetchall(),
+                    "grants": conn.execute(
+                        "SELECT g.category, g.instrument_code, g.jurisdiction_kind, "
+                        "g.permitted, g.max_rate, g.max_rate_unit, g.statute_cite, "
+                        "g.confidence, s.url FROM authority_grant g "
+                        "LEFT JOIN source s ON s.id=g.source_id WHERE g.state_usps=? "
+                        "ORDER BY g.category LIMIT 25", (usps,)).fetchall(),
+                }
+            else:
+                findings[key] = conn.execute(
+                    "SELECT t.id, t.instrument_code, t.status, t.rate_value, t.rate_unit, "
+                    "t.confidence, t.extraction_method, t.retrieved_at, s.url "
+                    "FROM tax_instrument t JOIN source s ON s.id=t.source_id "
+                    "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL",
+                    (r["geoid"], r["category"])).fetchall()
     finally:
         conn.close()
     return templates.TemplateResponse(request, "review.html", _ctx(
-        request, rows=rows, findings=findings, nav="review"))
+        request, rows=rows, findings=findings, measures=measures,
+        framework=framework, nav="review"))
 
 
 @app.get("/runs", response_class=HTMLResponse)
@@ -260,16 +423,23 @@ def api_status(_: bool = Depends(_auth)):
     try:
         stats = _stats(conn)
         s = store.get_all(conn)
+        progress = autopilot.progress(conn, s) if stats["ready"] else None
     finally:
         conn.close()
     snap = worker.snapshot()
     return {
         "stats": stats,
+        "progress": progress,
         "worker": snap,
+        "collecting": _collecting_line(s, stats, snap),
+        "blockers": _blockers(s, stats),
+        "running": store.as_bool(s.get("continuous_enabled")),
         "continuous_enabled": store.as_bool(s.get("continuous_enabled")),
+        "autopilot_enabled": store.as_bool(s.get("autopilot_enabled")),
         "schedule_enabled": store.as_bool(s.get("schedule_enabled")),
         "checker_enabled": store.as_bool(s.get("checker_enabled")),
         "provider": s.get("provider"),
+        "warning": snap.get("warning") or "",
     }
 
 
@@ -283,6 +453,9 @@ async def api_settings(request: Request, _: bool = Depends(_auth)):
             raise HTTPException(400, "invalid provider")
         if body.get("schedule_kind") is not None and body["schedule_kind"] not in VALID_SCHEDULE:
             raise HTTPException(400, "invalid schedule")
+        if body.get("search_provider") is not None \
+                and body["search_provider"] not in VALID_SEARCH:
+            raise HTTPException(400, "invalid search provider")
         updates = store.sanitize_updates(current, body)
         store.put_many(conn, updates)
     finally:
@@ -366,6 +539,65 @@ def api_activity(limit: int = 30, _: bool = Depends(_auth)):
     return events[:limit]
 
 
+@app.post("/api/start")
+def api_start(_: bool = Depends(_auth)):
+    """Turn on unattended collection, and set it up first if needed.
+
+    This is the whole home page. Everything it does used to be four separate
+    buttons plus a form nobody could fill in correctly the first time.
+    """
+    conn = store.connect()
+    try:
+        store.put_many(conn, {"continuous_enabled": "1", "autopilot_enabled": "1"})
+        stats = _stats(conn)
+    finally:
+        conn.close()
+    worker.resume()
+    worker.start()
+    return {"ok": True, "running": True, "ready": stats["ready"]}
+
+
+@app.post("/api/pause")
+def api_pause(_: bool = Depends(_auth)):
+    worker.request_stop()
+    return {"ok": True, "running": False}
+
+
+@app.post("/api/autopilot/step")
+def api_autopilot_step(_: bool = Depends(_auth)):
+    """Run one autopilot step now, without turning on continuous mode."""
+    conn = store.connect()
+    try:
+        settings = store.get_all(conn)
+        plan = autopilot.next_action(conn, settings)
+    finally:
+        conn.close()
+    if not plan:
+        return {"ok": True, "action": None,
+                "label": "nothing to do — everything planned is current"}
+    action, kwargs, label = plan
+
+    def _go():
+        try:
+            worker.run_action(action, kwargs, settings)
+        except Exception:
+            pass
+
+    threading.Thread(target=_go, name="autopilot-step", daemon=True).start()
+    return {"ok": True, "action": action, "label": label}
+
+
+@app.post("/api/export")
+def api_export(_: bool = Depends(_auth)):
+    conn = store.connect()
+    try:
+        outdir, counts = export.export_all(conn)
+    finally:
+        conn.close()
+    return {"ok": True, "dir": outdir, "files": counts,
+            "rows": sum(counts.values())}
+
+
 @app.post("/api/crawl/toggle")
 async def api_toggle(request: Request, _: bool = Depends(_auth)):
     body = await request.json()
@@ -430,7 +662,7 @@ async def api_plan(request: Request, _: bool = Depends(_auth)):
     body = await request.json()
     states = [x.strip().upper() for x in (body.get("states") or "").replace(",", " ").split() if x.strip()]
     kinds = [x.strip() for x in (body.get("kinds") or "county,place,state").split(",") if x.strip()]
-    cats = [x.strip() for x in (body.get("categories") or ",".join(CATEGORIES)).split(",") if x.strip()]
+    cats = [x.strip() for x in (body.get("categories") or ",".join(WORK_CATEGORIES)).split(",") if x.strip()]
     min_pop = int(body.get("min_pop") or 0)
     limit = body.get("limit")
     limit = int(limit) if limit else None
@@ -645,6 +877,10 @@ def api_inbox(_: bool = Depends(_auth)):
 
 @app.get("/api/interview")
 def api_interview(geoid: str, category: str, _: bool = Depends(_auth)):
+    if category in (FRAMEWORK, ELECTIONS):
+        raise HTTPException(
+            400, "The guided questions cover tax rates. For %s, open the item "
+                 "in Review or drop the document under Add a source." % category)
     if category not in CATEGORIES:
         raise HTTPException(400, "unknown category")
     conn = store.connect()
@@ -709,7 +945,7 @@ async def api_intake_create(request: Request, _: bool = Depends(_auth)):
     category = (form.get("category") or "").strip() or None
     url = (form.get("url") or "").strip() or None
     note = (form.get("note") or "").strip() or None
-    if category and category not in CATEGORIES:
+    if category and category not in WORK_CATEGORIES:
         raise HTTPException(400, "unknown category")
     if not geoid:
         raise HTTPException(400, "pick a jurisdiction first")

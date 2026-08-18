@@ -21,6 +21,7 @@ import json
 import re
 
 from taxdb import db, ledger
+from taxdb.vocab import ELECTIONS, FRAMEWORK
 
 from . import extract, store
 
@@ -54,6 +55,51 @@ Pass a finding only when it is defensible as-is. When uncertain, flag.
 Respond with ONLY valid JSON:
 {"verdicts":[{"instrument_code":"...","verdict":"pass"|"flag","reason":"short reason, empty when pass"}]}
 Include one verdict per finding you were given.
+"""
+
+
+MEASURE_SYSTEM = CHECK_SYSTEM_MEASURE = """You are a skeptical reviewer for a
+US local ballot-measure database. Another model read official election
+documents and recorded these measures. Catch mistakes, do not be agreeable.
+
+Flag a measure when any of these fail:
+- The vote counts or percentage do not match the source documents.
+- The result is recorded for the wrong jurisdiction, or for a statewide
+  measure rather than a local one.
+- measure_class is wrong (a bond recorded as a tax increase, a renewal
+  recorded as a new tax).
+- The outcome contradicts the numbers or the source's own statement.
+- The rate or principal amount does not match the ballot question.
+- The election date does not match the document.
+- The numbers look like unofficial election-night returns rather than a
+  certified canvass.
+
+Pass a measure only when it is defensible as-is. When uncertain, flag.
+Respond with ONLY valid JSON:
+{"verdicts":[{"instrument_code":"<measure_id_local or election_date>","verdict":"pass"|"flag","reason":"short reason, empty when pass"}]}
+Include one verdict per measure you were given.
+"""
+
+FRAMEWORK_SYSTEM = """You are a skeptical reviewer for a US local-tax
+statutory database. Another model read state code and recorded vote
+thresholds and authority caps. Catch mistakes, do not be agreeable.
+
+Flag a row when any of these fail:
+- The threshold percentage does not match the statute quoted (two-thirds is
+  66.67; three-fifths is 60).
+- The basis is wrong: a share of votes cast is not a share of registered
+  voters, and a dual-majority requirement is neither.
+- The cap or maximum rate is a statewide rate rather than the local ceiling,
+  or combines state and local.
+- The rule is attributed to the wrong kind of jurisdiction.
+- The cite does not support the rule, or is from another state.
+- The rule was superseded by a later amendment or court decision that the
+  document itself mentions.
+
+Pass a row only when it is defensible as-is. When uncertain, flag.
+Respond with ONLY valid JSON:
+{"verdicts":[{"instrument_code":"<measure_class or instrument_code>","verdict":"pass"|"flag","reason":"short reason, empty when pass"}]}
+Include one verdict per row you were given.
 """
 
 
@@ -106,21 +152,114 @@ def deterministic_flags(rows, doc_text):
     return flags
 
 
-def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None):
+def live_measures(conn, geoid, limit=40):
+    return conn.execute(
+        "SELECT b.id, b.measure_id_local, b.election_date, b.election_type, "
+        "b.measure_class, b.category, b.instrument_code, b.outcome, b.rate_value, "
+        "b.rate_unit, b.principal_amount, b.votes_yes, b.votes_no, b.votes_total, "
+        "b.pct_yes, b.threshold_required, b.threshold_basis, b.margin_vs_threshold, "
+        "b.stated_purpose, b.confidence, b.notes, s.url, s.authority_tier "
+        "FROM ballot_measure b LEFT JOIN source s ON s.id=b.source_id "
+        "WHERE b.geoid=? AND b.superseded_by IS NULL "
+        "ORDER BY b.election_date DESC LIMIT ?", (geoid, limit)).fetchall()
+
+
+def live_framework(conn, usps, limit=80):
+    """Thresholds and grants for one state, as one checkable list."""
+    thr = conn.execute(
+        "SELECT t.id, t.measure_class AS label, t.jurisdiction_kind, "
+        "t.purpose_restriction, t.threshold_value, t.threshold_basis, "
+        "t.statute_cite, t.confidence, t.notes, s.url, s.authority_tier "
+        "FROM threshold_rule t LEFT JOIN source s ON s.id=t.source_id "
+        "WHERE t.state_usps=? ORDER BY t.id DESC LIMIT ?", (usps, limit)).fetchall()
+    ag = conn.execute(
+        "SELECT g.id, g.instrument_code AS label, g.jurisdiction_kind, g.category, "
+        "g.permitted, g.max_rate, g.max_rate_unit, g.statute_cite, g.confidence, "
+        "g.notes, s.url, s.authority_tier "
+        "FROM authority_grant g LEFT JOIN source s ON s.id=g.source_id "
+        "WHERE g.state_usps=? ORDER BY g.id DESC LIMIT ?", (usps, limit)).fetchall()
+    return list(thr) + list(ag)
+
+
+def measure_flags(rows, doc_text):
+    """Deterministic checks on recorded measures."""
+    flags = []
+    norm_doc = _norm(doc_text) if doc_text else ""
+
+    def flag(code, label, reason):
+        flags.append({"code": code, "instrument_code": label, "reason": reason})
+
+    for r in rows:
+        label = r["measure_id_local"] or r["election_date"]
+        if r["votes_total"] is None and r["pct_yes"] is None:
+            flag("no_result", label, "no vote counts and no percentage recorded")
+        if r["threshold_required"] is None:
+            flag("no_threshold", label,
+                 "no threshold on file for this measure class, so the margin "
+                 "against threshold cannot be computed — run the state "
+                 "framework pass")
+        if r["outcome"] == "unknown":
+            flag("outcome_unknown", label, "outcome is unknown")
+        if r["confidence"] == "low":
+            flag("low_confidence", label, "extractor marked this low confidence")
+        if (r["authority_tier"] or 4) >= 4:
+            flag("weak_source", label,
+                 "sourced to a tier-4 aggregator rather than the elections office")
+        if norm_doc and r["measure_id_local"]:
+            if _norm(str(r["measure_id_local"])) not in norm_doc:
+                flag("id_missing", label,
+                     "measure identifier does not appear in the crawled documents")
+        if r["election_date"] and r["election_date"] > db.now()[:10] \
+                and r["outcome"] in ("passed", "failed"):
+            flag("future_result", label,
+                 "election date is in the future but a result is recorded")
+    return flags
+
+
+def framework_flags(rows, doc_text):
+    """Deterministic checks on recorded thresholds and caps."""
+    flags = []
+    norm_doc = _norm(doc_text) if doc_text else ""
+
+    def flag(code, label, reason):
+        flags.append({"code": code, "instrument_code": label, "reason": reason})
+
+    for r in rows:
+        keys = r.keys()
+        label = r["label"]
+        if "threshold_value" in keys and r["threshold_value"] is not None:
+            tv = r["threshold_value"]
+            if tv <= 1.0:
+                flag("threshold_scale", label,
+                     "threshold %s looks like a fraction; percentages are "
+                     "expected (two-thirds is 66.67)" % tv)
+            elif tv < 50.0:
+                flag("threshold_low", label,
+                     "threshold %s%% is below a simple majority" % tv)
+        if "permitted" in keys and r["permitted"] == "yes" \
+                and r["max_rate"] is None:
+            flag("no_cap", label,
+                 "permitted with no maximum rate recorded — confirm the "
+                 "statute really sets no ceiling")
+        if not r["statute_cite"]:
+            flag("no_cite", label, "no statutory cite")
+        elif norm_doc and _norm(r["statute_cite"]) not in norm_doc:
+            flag("cite_missing", label,
+                 "cite %s does not appear in the crawled documents" % r["statute_cite"])
+        if r["confidence"] == "low":
+            flag("low_confidence", label, "extractor marked this low confidence")
+        if (r["authority_tier"] or 4) >= 4:
+            flag("weak_source", label,
+                 "sourced to a tier-4 aggregator rather than the code itself")
+    return flags
+
+
+def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
+             system=None):
     """Returns (flags, error). error is set when the checker call failed."""
     max_chars = store.as_int(settings.get("checker_max_chars"), 40000)
-    findings = [{
-        "instrument_code": r["instrument_code"],
-        "label": r["label"],
-        "status": r["status"],
-        "rate_value": r["rate_value"],
-        "rate_unit": r["rate_unit"],
-        "confidence": r["confidence"],
-        "source_quote": r["source_quote"],
-        "source_url": r["url"],
-        "effective_date": r["effective_date"],
-        "notes": r["notes"],
-    } for r in rows]
+    # Whatever columns the subject query selected, minus the internal id.
+    findings = [{k: r[k] for k in r.keys() if k != "id"} for r in rows]
     prompt = (
         "## Jurisdiction\n%s\n\n## Category\n%s\n\n"
         "## Findings to verify\n```json\n%s\n```\n\n"
@@ -130,7 +269,7 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None):
            json.dumps(findings, indent=1),
            (doc_text or "_none — rely on the quotes and common sense_")[:max_chars]))
     model = (settings.get("checker_model") or "").strip() or None
-    raw, err = extract.chat(settings, prompt, system=CHECK_SYSTEM,
+    raw, err = extract.chat(settings, prompt, system=system or CHECK_SYSTEM,
                             images=images, model=model)
     if err:
         return [], err
@@ -173,9 +312,28 @@ def summarize(flags, limit=3):
     return "checker flagged — " + "; ".join(parts)
 
 
+def subject(conn, geoid, category):
+    """What to check for this work item, and how to describe it to the model.
+
+    Returns (rows, flag_fn, system_prompt, noun). The three passes check
+    different tables, so the checker has to know which one it is looking at.
+    """
+    if category == ELECTIONS:
+        return (live_measures(conn, geoid), measure_flags, MEASURE_SYSTEM,
+                "measure")
+    if category == FRAMEWORK:
+        j = conn.execute("SELECT state_usps FROM jurisdiction WHERE geoid=?",
+                         (geoid,)).fetchone()
+        usps = j["state_usps"] if j else geoid
+        return (live_framework(conn, usps), framework_flags, FRAMEWORK_SYSTEM,
+                "framework rule")
+    return (live_rows(conn, geoid, category), deterministic_flags, CHECK_SYSTEM,
+            "finding")
+
+
 def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
                   images=None, jurisdiction=None):
-    """Check the live findings for one work item and set its status.
+    """Check what was just written for one work item and set its status.
 
     Returns (verdict, message). verdict is 'pass', 'flag', 'error', or
     'off' when the checker is disabled (status is then left at
@@ -184,7 +342,7 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
     if not store.as_bool(settings.get("checker_enabled")):
         return "off", "checker disabled — human review required"
 
-    rows = live_rows(conn, geoid, category)
+    rows, flag_fn, system, noun = subject(conn, geoid, category)
     if not rows:
         return "off", "nothing to check"
 
@@ -195,11 +353,11 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
                         (j["name"], j["state_usps"], j["kind"],
                          j["population"], geoid)) if j else geoid
 
-    flags = deterministic_flags(rows, doc_text)
+    flags = flag_fn(rows, doc_text)
     err = None
     if (settings.get("provider") or "none") != "none":
         more, err = ai_flags(settings, jurisdiction, category, rows,
-                             doc_text, images=images)
+                             doc_text, images=images, system=system)
         flags.extend(more)
     else:
         err = "no AI provider for the checker"

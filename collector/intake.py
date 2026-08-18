@@ -160,16 +160,11 @@ def process_item(conn, settings, item):
         if xerr or not doc:
             _fail(conn, item_id, xerr or "extract failed")
             return 0
-        for f in doc.get("findings") or []:
-            if geoid:
-                f.setdefault("geoid", geoid)
-            if category:
-                f.setdefault("category", category)
-            f.setdefault("extraction_method", "agent_research")
-            if item.get("url"):
-                src = f.get("source") or {}
-                src.setdefault("url", item["url"])
-                f["source"] = src
+        j = conn.execute("SELECT state_usps FROM jurisdiction WHERE geoid=?",
+                         (geoid,)).fetchone() if geoid else None
+        ingest.stamp_doc(doc, geoid=geoid, category=category,
+                         state_usps=j["state_usps"] if j else None,
+                         researcher=researcher, source_url=item.get("url"))
         res = ingest.load_doc(conn, doc, allow_partial=True,
                               label="intake:%s" % item_id)
         conn.execute(

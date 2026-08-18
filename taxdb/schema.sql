@@ -1,5 +1,5 @@
 -- Tax Database: unified schema.
--- 18 tables, 7 product views. Every substantive claim carries provenance.
+-- 18 tables, 8 product views. Every substantive claim carries provenance.
 -- SQLite. Apply as one file -- rate_change_event forward-references
 -- ballot_measure, and a partial apply with PRAGMA foreign_keys=ON makes
 -- every insert into rate_change_event fail.
@@ -181,6 +181,15 @@ CREATE TABLE IF NOT EXISTS authority_grant (
 CREATE INDEX IF NOT EXISTS idx_ag_lookup
     ON authority_grant(state_usps, instrument_code, jurisdiction_kind);
 
+-- Dedup key for repeated research passes. Without it a nightly framework run
+-- appends a fresh copy of the same cap every night and v_live_grant starts
+-- picking winners by rowid. NULL kind and NULL effective_from are ordinary
+-- values here, hence ifnull().
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ag_unique
+    ON authority_grant(
+        state_usps, ifnull(jurisdiction_kind, ''), category, instrument_code,
+        ifnull(effective_from, ''));
+
 -- Vote share a measure needs, and every structural constraint around
 -- getting it on the ballot. Versioned: rules change (CA Upland 2017).
 -- Human-verify 100% of this table.
@@ -222,6 +231,15 @@ CREATE TABLE IF NOT EXISTS threshold_rule (
 
 CREATE INDEX IF NOT EXISTS idx_thr_lookup
     ON threshold_rule(state_usps, measure_class, jurisdiction_kind);
+
+-- Same reasoning as idx_ag_unique. purpose_restriction is part of the key:
+-- general-purpose and special-purpose versions of one measure class carry
+-- different thresholds in most states, and both are live at once.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thr_unique
+    ON threshold_rule(
+        state_usps, ifnull(jurisdiction_kind, ''), measure_class,
+        ifnull(instrument_code, ''), ifnull(purpose_restriction, ''),
+        ifnull(effective_from, ''));
 
 -- ============================================================ L3 FACTS (per jurisdiction)
 
@@ -595,6 +613,25 @@ WHERE a.permitted = 'yes'
            OR (a2.jurisdiction_kind IS NULL AND a.jurisdiction_kind IS NULL))
       AND (a2.effective_to IS NULL OR a2.effective_to >= date('now'))
     ORDER BY COALESCE(a2.effective_from,'0000') DESC, a2.id DESC
+    LIMIT 1
+  );
+
+-- Exactly one live, most-specific threshold per
+-- (state, kind, measure_class, purpose). Mirrors v_live_grant.
+CREATE VIEW IF NOT EXISTS v_live_threshold AS
+SELECT * FROM threshold_rule t
+WHERE (t.effective_from IS NULL OR t.effective_from <= date('now'))
+  AND (t.effective_to   IS NULL OR t.effective_to   >= date('now'))
+  AND t.id = (
+    SELECT t2.id FROM threshold_rule t2
+    WHERE t2.state_usps = t.state_usps
+      AND t2.measure_class = t.measure_class
+      AND (t2.jurisdiction_kind = t.jurisdiction_kind
+           OR (t2.jurisdiction_kind IS NULL AND t.jurisdiction_kind IS NULL))
+      AND (t2.purpose_restriction = t.purpose_restriction
+           OR (t2.purpose_restriction IS NULL AND t.purpose_restriction IS NULL))
+      AND (t2.effective_to IS NULL OR t2.effective_to >= date('now'))
+    ORDER BY COALESCE(t2.effective_from,'0000') DESC, t2.id DESC
     LIMIT 1
   );
 

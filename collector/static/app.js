@@ -49,7 +49,22 @@ document.addEventListener("click", async (ev) => {
   if (btn) {
     const act = btn.dataset.action;
     try {
-      if (act === "burst") {
+      if (act === "start") {
+        const r = await api("/api/start", {});
+        toast(r.ready ? "Collecting. Leave this running."
+                      : "Setting up first — this takes a few minutes.");
+        setStartButtons(true);
+      } else if (act === "pause") {
+        await api("/api/pause", {});
+        toast("Paused. Nothing new will be collected.");
+        setStartButtons(false);
+      } else if (act === "step") {
+        const r = await api("/api/autopilot/step", {});
+        toast(r.label || "nothing to do");
+      } else if (act === "export") {
+        const r = await api("/api/export", {});
+        toast("Exported CSVs to " + r.dir);
+      } else if (act === "burst") {
         const size = Number(document.getElementById("burst-size").value || 20);
         await api("/api/crawl/burst", { size });
         toast("Burst started (" + size + " items)");
@@ -109,6 +124,13 @@ document.addEventListener("click", async (ev) => {
     document.getElementById("j-results").hidden = true;
   }
 });
+
+function setStartButtons(running) {
+  const start = document.getElementById("btn-start");
+  const pause = document.getElementById("btn-pause");
+  if (start) start.hidden = running;
+  if (pause) pause.hidden = !running;
+}
 
 document.getElementById("toggle-continuous")?.addEventListener("change", async (ev) => {
   try {
@@ -244,26 +266,36 @@ async function poll() {
     set("stat-verified", s.stats.auto_verified);
     set("stat-instruments", s.stats.instruments);
     set("stat-pages", s.stats.pages);
-    const fill = document.getElementById("progress-fill");
-    if (fill) fill.style.width = s.stats.pct_done + "%";
-    set("progress-line", s.stats.done + " of " + s.stats.work_items +
-      " items researched (" + s.stats.pct_done + "%) · " + s.stats.needs_review +
-      " flagged for review · " + s.stats.pending + " pending");
-    const line = document.getElementById("worker-line");
-    if (line) {
-      if (s.worker.current_name) line.textContent = "Working " + s.worker.current_name;
-      else if (s.worker.message) line.textContent = s.worker.message;
-      else line.textContent = s.worker.state === "running" ? "Running…" : "Idle.";
+    set("collect-line", s.collecting);
+    set("rail-state", s.worker.state === "running" ? "collecting" : s.worker.state);
+    setStartButtons(s.running);
+
+    if (s.progress) {
+      const fill = document.getElementById("progress-fill");
+      if (fill) fill.style.width = s.progress.pop_pct + "%";
+      const line = document.getElementById("progress-line");
+      if (line) {
+        line.innerHTML = "Records cover <strong>" + s.progress.pop_pct +
+          "%</strong> of the US population (" +
+          s.progress.juris_done.toLocaleString() + " of " +
+          s.progress.juris_total.toLocaleString() +
+          " counties and cities finished, " + s.progress.states_done + " of " +
+          s.progress.states_total + " states' rules confirmed).";
+      }
+    }
+
+    const warn = document.getElementById("warn-line");
+    if (warn) {
+      warn.textContent = s.warning || "";
+      warn.hidden = !s.warning;
     }
     const pulse = document.querySelector(".pulse");
-    if (pulse) {
-      pulse.classList.toggle("live", s.worker.state === "running");
-      pulse.lastChild && (pulse.childNodes[pulse.childNodes.length - 1].textContent =
-        " " + s.worker.state + (s.worker.mode ? " · " + s.worker.mode : ""));
-    }
+    if (pulse) pulse.classList.toggle("live", s.worker.state === "running");
   } catch (e) { /* ignore */ }
 }
-if (document.getElementById("stat-pending")) setInterval(poll, 2500);
+if (document.getElementById("collect-line") || document.getElementById("stat-pending")) {
+  setInterval(poll, 2500);
+}
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({

@@ -6,9 +6,9 @@ import time
 import traceback
 
 from taxdb import db, ingest, ledger, packets, seed as seedmod, sources, coverage
-from taxdb.vocab import CATEGORIES
+from taxdb.vocab import ELECTIONS, FRAMEWORK, WORK_CATEGORIES
 
-from . import check, crawl, extract, intake, store
+from . import autopilot, check, crawl, extract, intake, store
 from .settings import VALID_CATEGORIES, VALID_KINDS
 
 _cancel = threading.Event()
@@ -24,6 +24,8 @@ _status = {
     "current_geoid": None,
     "current_name": None,
     "message": "",
+    "step": "",
+    "warning": "",
 }
 
 
@@ -48,6 +50,7 @@ def start():
 
 def request_stop():
     _cancel.set()
+    _set(step="")
     conn = store.connect()
     try:
         store.put(conn, "continuous_enabled", "0")
@@ -123,18 +126,101 @@ def _loop():
                 # the cancel flag is still checked between items.
                 _run_batch("continuous", store.as_int(s.get("burst_size"), 20))
                 if (snapshot().get("message") or "").startswith("queue empty"):
-                    time.sleep(8)
+                    # An empty queue is not the end of the work. Ask the
+                    # autopilot for the next thing and keep going.
+                    if not _autopilot_step(s):
+                        _set(step="", message="everything planned is done and "
+                                              "current — nothing left to research")
+                        time.sleep(20)
                 continue
             if _schedule_due(s):
                 _mark_scheduled()
                 _run_batch("schedule", store.as_int(s.get("burst_size"), 20))
                 continue
             _set(state="idle", mode=None, run_id=None, current_geoid=None,
-                 current_name=None)
+                 current_name=None, step="")
             time.sleep(1.5)
         except Exception:
             _set(state="error", message=traceback.format_exc()[-500:])
             time.sleep(5)
+
+
+def _autopilot_step(settings):
+    """Run one autopilot action. True if something was done."""
+    if not autopilot.enabled(settings):
+        return False
+    conn = store.connect()
+    try:
+        plan = autopilot.next_action(conn, settings)
+    finally:
+        conn.close()
+    if not plan:
+        return False
+    action, kwargs, label = plan
+    _set(state="running", mode="autopilot", step=label, message=label)
+    try:
+        run_action(action, kwargs, settings)
+        return True
+    except Exception as exc:
+        # A failed bulk download must not spin the loop. The cooldown marker
+        # was written before the attempt, so the next tick moves on.
+        _set(state="idle", step="", message="%s failed: %s" % (label, str(exc)[:300]))
+        time.sleep(5)
+        return True
+
+
+def run_action(action, kwargs, settings=None):
+    """Execute one autopilot action. Raises on failure."""
+    conn = store.connect()
+    try:
+        settings = settings or store.get_all(conn)
+        if action in autopilot.COOLDOWN_HOURS:
+            autopilot.mark_tried(conn, action)
+        if action == autopilot.STATUTES:
+            autopilot.mark_tried(conn, "%s:%s" % (action, kwargs["usps"]))
+    finally:
+        conn.close()
+
+    if action == autopilot.SEED:
+        return run_seed(include_mcd=False)
+    if action == autopilot.SOURCES:
+        conn = store.connect()
+        try:
+            n = sources.seed_catalog(conn)
+            coverage.seed_empty_states(conn)
+            _set(message="recorded %d state source(s)" % n)
+            return n
+        finally:
+            conn.close()
+    if action == autopilot.SST:
+        return run_adapter("sst", states=kwargs.get("states"))
+    if action == autopilot.COG:
+        return run_cog()
+    if action == autopilot.STATUTES:
+        return run_statutes(kwargs["usps"])
+    if action == autopilot.PLAN_FRAMEWORK:
+        n = run_plan(kwargs["states"], kinds=("state",), categories=[FRAMEWORK])
+        _set(message="queued the statutory framework for %d state(s)"
+                     % len(kwargs["states"]))
+        return n
+    if action == autopilot.EXPAND:
+        conn = store.connect()
+        try:
+            n = autopilot.expand(conn, kwargs["geoids"], settings)
+            _set(message="added %d work item(s) for %d place(s)"
+                         % (n, len(kwargs["geoids"])))
+            return n
+        finally:
+            conn.close()
+    if action == autopilot.REFRESH:
+        conn = store.connect()
+        try:
+            n = ledger.requeue_stale(conn, days=kwargs.get("days", 365))
+            _set(message="sent %d stale item(s) back for a fresh look" % n)
+            return n
+        finally:
+            conn.close()
+    raise RuntimeError("unknown autopilot action %r" % action)
 
 
 def _schedule_due(s):
@@ -237,7 +323,7 @@ def _run_batch(mode, limit):
             client.close()
         store.finish_run(conn, run_id, "ok", None, items=items, pages=pages,
                          findings=findings)
-        _set(state="idle", current_geoid=None, current_name=None,
+        _set(state="idle", current_geoid=None, current_name=None, step="",
              message="finished %s: %d item(s), %d page(s), %d finding(s)"
              % (mode, items, pages, findings))
         return True
@@ -264,6 +350,7 @@ def _claim(conn, s, limit):
         categories=cats,
         kinds=kinds,
         min_pop=store.as_int(s.get("min_pop"), 0) or None,
+        max_attempts=store.as_int(s.get("max_attempts"), 4) or None,
     )
 
 
@@ -272,19 +359,30 @@ def _process(conn, client, s, run_id, row):
     j = conn.execute("SELECT * FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     name = j["name"] if j else geoid
     state = j["state_usps"] if j else ""
-    _set(current_geoid=geoid, current_name="%s (%s) / %s" % (name, state, category))
+    _set(current_geoid=geoid, current_name="%s (%s) / %s" % (name, state, category),
+         step=_step_label(name, state, category))
 
+    diag = crawl.new_diag()
     pages, text = crawl.crawl_item(
-        conn, client, s, run_id, geoid, category, name, state)
+        conn, client, s, run_id, geoid, category, name, state, diag=diag)
     n_pages = len(pages)
+    search_note = crawl.search_note(diag)
+    if search_note:
+        _set(warning=search_note)
 
-    if (s.get("provider") or "none") == "none":
-        ledger.set_status(conn, geoid, category, "needs_review")
+    def park(status, message):
+        """Leave the item somewhere a human can act on, with the reason."""
+        note = message if not search_note else "%s (%s)" % (message, search_note)
+        ledger.set_status(conn, geoid, category, status)
         conn.execute(
             "UPDATE work_item SET last_error=?, updated_at=? WHERE geoid=? AND category=?",
-            ("archived %d page(s); no AI provider — enter findings manually or set a provider and return to queue"
-             % n_pages, db.now(), geoid, category))
+            (note[:500], db.now(), geoid, category))
         conn.commit()
+
+    if (s.get("provider") or "none") == "none":
+        park("needs_review",
+             "archived %d page(s); no AI provider — enter findings manually or "
+             "set a provider and return to queue" % n_pages)
         return n_pages, 0
 
     packet = packets.build(conn, geoid, [category])
@@ -298,33 +396,66 @@ def _process(conn, client, s, run_id, row):
     conn.commit()
 
     if err or not doc:
-        ledger.set_status(conn, geoid, category, "pending")
-        conn.execute(
-            "UPDATE work_item SET last_error=?, updated_at=? WHERE geoid=? AND category=?",
-            ((err or "extract failed")[:500], db.now(), geoid, category))
-        conn.commit()
+        park("pending", (err or "extract failed"))
         return n_pages, 0
 
-    for f in doc.get("findings") or []:
-        f.setdefault("geoid", geoid)
-        f.setdefault("extraction_method", "agent_research")
-        f.setdefault("researcher", researcher)
+    ingest.stamp_doc(doc, geoid=geoid, category=category, state_usps=state,
+                     researcher=researcher)
 
     res = ingest.load_doc(conn, doc, allow_partial=True,
                           label="crawl:%s/%s" % (geoid, category))
+
     if res["written"] == 0:
-        ledger.set_status(conn, geoid, category, "needs_review")
-        conn.execute(
-            "UPDATE work_item SET last_error=?, updated_at=? WHERE geoid=? AND category=?",
-            ("extractor returned 0 valid findings (%d rejected); pages archived"
-             % res["rejected"], db.now(), geoid, category))
-        conn.commit()
+        # An empty answer is a real answer for the elections pass: this county
+        # published nothing we could find. Record it as a coverage gap rather
+        # than leaving a blank that reads like "never tried".
+        if category == ELECTIONS and not res["rejected"]:
+            coverage.assert_scope(
+                conn, "ballot_measure", geoid, scope_type="county",
+                completeness="spot_checked", measures_found=0,
+                basis="Collector searched the county elections office and found "
+                      "no revenue measures in the documents it could reach.",
+                asserted_by="collector")
+            ledger.set_status(conn, geoid, category, "no_data")
+            conn.execute(
+                "UPDATE work_item SET last_error=?, updated_at=? "
+                "WHERE geoid=? AND category=?",
+                ("no revenue measures found; recorded as a coverage gap",
+                 db.now(), geoid, category))
+            conn.commit()
+            return n_pages, 0
+        park("needs_review",
+             "extractor returned 0 valid rows (%d rejected); pages archived"
+             % res["rejected"])
         return n_pages, 0
+
+    if category == ELECTIONS and res["by_type"].get("measures"):
+        coverage.assert_scope(
+            conn, "ballot_measure", geoid, scope_type="county",
+            completeness="partial", measures_found=res["by_type"]["measures"],
+            basis="Collector read county elections documents. Coverage is "
+                  "partial until a full canvass series is loaded.",
+            asserted_by="collector")
 
     # Second checker: items that pass are marked complete with no human
     # review; anything flagged stays at needs_review with the reasons.
     check.run_and_apply(conn, s, run_id, geoid, category, text)
+    if search_note:
+        conn.execute(
+            "UPDATE work_item SET last_error=COALESCE(last_error || ' | ', '') || ? "
+            "WHERE geoid=? AND category=?", (search_note[:300], geoid, category))
+        conn.commit()
     return n_pages, res["written"]
+
+
+def _step_label(name, state, category):
+    """What the home page says we are doing, in plain language."""
+    if category == FRAMEWORK:
+        return "Reading %s state law: what it takes to pass a measure" % state
+    if category == ELECTIONS:
+        return "Reading %s election results for past revenue measures" % name
+    return "Researching %s taxes in %s, %s" % (
+        category.replace("_", " "), name, state)
 
 
 def _model_name(s):
@@ -374,7 +505,7 @@ def run_plan(states, kinds=None, categories=None, min_pop=0, limit=None):
     run_id = store.start_run(conn, "plan", filter_states=",".join(states or []))
     try:
         kinds = tuple(kinds or ("county", "place", "state"))
-        cats = list(categories or CATEGORIES.keys())
+        cats = list(categories or WORK_CATEGORIES.keys())
         n = ledger.plan(conn, states=states, kinds=kinds, categories=cats,
                         min_pop=min_pop, limit=limit)
         store.finish_run(conn, run_id, "ok", "created %d work items" % n, items=n)

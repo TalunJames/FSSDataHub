@@ -75,3 +75,56 @@ def list_assertions(conn, domain=None, completeness=None):
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY c.scope_geoid, c.domain"
     return conn.execute(sql, params).fetchall()
+
+
+def assert_scope(conn, domain, scope_geoid, scope_type="county", completeness="partial",
+                 basis="", asserted_by="collector", jurisdiction_kind=None,
+                 period_start="1990-01-01", period_end="2099-12-31",
+                 measures_found=None, known_exclusions=None, source_id=None,
+                 only_if_absent=False):
+    """Upsert one coverage assertion.
+
+    Called whenever a research pass finishes a scope, including when it finds
+    nothing. A county that genuinely has no revenue measures on file and a
+    county nobody has looked at must never read the same way.
+
+    only_if_absent leaves an existing assertion alone. Use it for automatic
+    claims, so a machine's cautious "partial" can never overwrite a
+    researcher's considered "substantial".
+    """
+    if only_if_absent and conn.execute(
+            "SELECT 1 FROM coverage_assertion WHERE domain=? AND scope_type=? "
+            "AND scope_geoid=?", (domain, scope_type, scope_geoid)).fetchone():
+        return False
+    conn.execute(
+        "INSERT OR IGNORE INTO coverage_assertion ("
+        "domain, scope_type, scope_geoid, jurisdiction_kind, period_start, "
+        "period_end, completeness, basis, known_exclusions, measures_found, "
+        "source_id, asserted_by, asserted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (domain, scope_type, scope_geoid, jurisdiction_kind, period_start,
+         period_end, completeness, basis, known_exclusions, measures_found,
+         source_id, asserted_by, db.now()))
+    conn.execute(
+        "UPDATE coverage_assertion SET completeness=?, basis=?, known_exclusions=?, "
+        "measures_found=?, source_id=COALESCE(?, source_id), asserted_by=?, "
+        "asserted_at=? WHERE domain=? AND scope_type=? AND scope_geoid=? "
+        "AND ifnull(jurisdiction_kind,'')=ifnull(?,'') AND period_start=? "
+        "AND period_end=?",
+        (completeness, basis, known_exclusions, measures_found, source_id,
+         asserted_by, db.now(), domain, scope_type, scope_geoid,
+         jurisdiction_kind, period_start, period_end))
+    conn.commit()
+    return True
+
+
+SCOPE_TYPE_FOR_KIND = {
+    "state": "state", "county": "county",
+    "place": "place", "mcd": "place", "school": "place",
+}
+
+
+def scope_type_for(conn, geoid):
+    """coverage_assertion.scope_type only allows state/county/place."""
+    row = conn.execute("SELECT kind FROM jurisdiction WHERE geoid=?",
+                       (geoid,)).fetchone()
+    return SCOPE_TYPE_FOR_KIND.get(row["kind"] if row else "", "place")

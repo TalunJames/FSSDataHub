@@ -87,6 +87,7 @@ def _pull_env_secrets(conn):
         "anthropic_model": "ANTHROPIC_MODEL",
         "llama_model": "LLAMA_MODEL",
         "provider": "COLLECTOR_PROVIDER",
+        "search_api_key": "SEARCH_API_KEY",
     }
     for key, env in env_map.items():
         raw = os.environ.get(env)
