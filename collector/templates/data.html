@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}The data{% endblock %}
+{% block body %}
+<header class="page">
+  <div>
+    <h1>The data</h1>
+    <p class="lede">What is in the database, and which parts are still empty. An empty table here is a gap in coverage, never a finding.</p>
+  </div>
+  <div class="row" style="flex:none">
+    <button data-action="export">Export to CSV</button>
+  </div>
+</header>
+
+<section class="stats">
+  <article><span class="k">Tax rates &amp; caps</span><strong>{{ counts.tax_instrument }}</strong></article>
+  <article><span class="k">Ballot measures</span><strong>{{ counts.ballot_measure }}</strong></article>
+  <article><span class="k">Vote thresholds</span><strong>{{ counts.threshold_rule }}</strong></article>
+  <article><span class="k">Authority caps</span><strong>{{ counts.authority_grant }}</strong></article>
+  <article><span class="k">Revenue bases</span><strong>{{ counts.revenue_base }}</strong></article>
+  <article><span class="k">Statute sections</span><strong>{{ counts.statute_section }}</strong></article>
+  <article><span class="k">Documents archived</span><strong>{{ counts.archive_file }}</strong></article>
+  <article><span class="k">Citations</span><strong>{{ counts.claim_source }}</strong></article>
+</section>
+
+<section class="panel">
+  <h2>Sunsets coming up</h2>
+  <p class="hint">Taxes on file with an expiration date inside the next three years. This is the list that says who has to go back to voters, and when.</p>
+  {% if sunset %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>State</th><th>Place</th><th>Tax</th><th class="num">Rate</th><th>Expires</th><th class="num">Days</th><th class="num">Past measures</th><th class="num">Best yes</th></tr></thead>
+    <tbody>
+      {% for r in sunset %}
+      <tr>
+        <td>{{ r.state_usps }}</td><td>{{ r.name }} <span class="dim">{{ r.kind }}</span></td>
+        <td>{{ r.instrument_code }}</td>
+        <td class="num">{% if r.rate_value is not none %}{{ r.rate_value }} {{ r.rate_unit }}{% endif %}</td>
+        <td>{{ r.expiration_date }}</td><td class="num">{{ r.days_out }}</td>
+        <td class="num">{{ r.prior_revenue_measures }}</td>
+        <td class="num">{% if r.best_prior_yes is not none %}{{ r.best_prior_yes|round(1) }}%{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="hint dim">Empty. Needs tax records that carry an expiration date. Sunset dates come from the tax research pass.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Near misses</h2>
+  <p class="hint">Revenue measures that failed within eight points of their threshold, last six years.</p>
+  {% if near_miss %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>State</th><th>Place</th><th>Date</th><th>Measure</th><th>Kind</th><th class="num">Yes</th><th class="num">Needed</th><th class="num">Margin</th></tr></thead>
+    <tbody>
+      {% for r in near_miss %}
+      <tr>
+        <td>{{ r.state_usps }}</td><td>{{ r.name }}</td><td>{{ r.election_date }}</td>
+        <td>{{ r.measure_id_local }}</td><td>{{ r.measure_class }}</td>
+        <td class="num">{{ r.pct_yes|round(2) }}%</td><td class="num">{{ r.threshold_required|round(2) }}%</td>
+        <td class="num bad">{{ r.margin_vs_threshold|round(2) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="hint dim">Empty. Needs two things: ballot measures ({{ counts.ballot_measure }} on file) and the vote thresholds to measure them against ({{ counts.threshold_rule }} on file). Both come from the state rules pass and the election results pass.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Room under the cap</h2>
+  <p class="hint">Where state law allows a higher rate than the jurisdiction currently levies. Largest places first.</p>
+  {% if headroom %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>State</th><th>Place</th><th>Tax</th><th class="num">Cap</th><th class="num">Levied</th><th class="num">Room</th></tr></thead>
+    <tbody>
+      {% for r in headroom %}
+      <tr>
+        <td>{{ r.state_usps }}</td><td>{{ r.name }} <span class="dim">{{ r.kind }}</span></td>
+        <td>{{ r.instrument_code }}</td>
+        <td class="num">{{ r.max_rate }} {{ r.max_rate_unit }}</td>
+        <td class="num">{{ r.levied_rate }}</td>
+        <td class="num ok">{{ r.headroom }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="hint dim">Empty. Needs authority caps from the state rules pass ({{ counts.authority_grant }} on file). Without them there is nothing to compare a levied rate against.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Rate changes with no measure attached</h2>
+  <p class="hint">A rate went up or was extended, in a state where that normally needs voter approval, and we have not found the measure. Each row is a missing piece of election history.</p>
+  {% if gap %}
+  <div class="scroll">
+  <table>
+    <thead><tr><th>State</th><th>Place</th><th>Tax</th><th>Change</th><th class="num">From</th><th class="num">To</th><th>Period</th></tr></thead>
+    <tbody>
+      {% for r in gap %}
+      <tr>
+        <td>{{ r.state_usps }}</td><td>{{ r.name }}</td><td>{{ r.instrument_code }}</td>
+        <td>{{ r.change_type }}</td><td class="num">{{ r.rate_before }}</td>
+        <td class="num">{{ r.rate_after }}</td><td>{{ r.effective_period }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="hint dim">Empty. Fills in once rate history and authority caps are both loaded.</p>
+  {% endif %}
+</section>
+
+<section class="split">
+  <div class="panel">
+    <h2>Election history coverage</h2>
+    <p class="hint">How much of the ballot-measure record we claim to have. Every county starts at <code>none</code> so silence is never mistaken for "they never tried".</p>
+    <table>
+      <thead><tr><th>Claim</th><th class="num">Scopes</th></tr></thead>
+      <tbody>
+        {% for r in coverage_rows %}
+        <tr><td><span class="tag" data-v="{{ r.completeness }}">{{ r.completeness }}</span></td><td class="num">{{ r.c }}</td></tr>
+        {% else %}
+        <tr><td colspan="2" class="dim">Nothing asserted yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Progress by state</h2>
+    <div class="scroll tall">
+    <table>
+      <thead><tr><th>State</th><th class="num">Done</th><th class="num">Needs you</th><th class="num">To do</th><th class="num">Stuck</th></tr></thead>
+      <tbody>
+        {% for r in by_state %}
+        <tr>
+          <td><a href="/queue?state={{ r.st }}">{{ r.st }}</a></td>
+          <td class="num">{{ r.done }}</td><td class="num">{{ r.review }}</td>
+          <td class="num">{{ r.pending }}</td><td class="num">{{ r.blocked }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="dim">No work planned yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+{% endblock %}

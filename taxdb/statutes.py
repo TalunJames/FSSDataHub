@@ -107,6 +107,13 @@ def for_packet(conn, usps, categories, limit=8):
         "property": ["property tax", "millage", "levy limit", "assessment"],
         "income_payroll": ["income tax", "earnings tax", "occupational"],
         "other_levy": ["franchise", "excise", "transfer tax", "utility tax"],
+        # The framework pass reads for thresholds and caps, not rates.
+        "framework": ["three-fifths", "two-thirds", "sixty percent",
+                      "majority of the electors", "shall not exceed",
+                      "submitted to the electors", "special election",
+                      "levy limit", "home rule"],
+        "elections": ["canvass", "certif", "submitted to the electors",
+                      "ballot", "special election"],
     }
     for c in categories or CATEGORIES:
         terms.extend(extra.get(c, []))

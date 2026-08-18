@@ -470,7 +470,8 @@ class FetcherTests(DbTest):
         self.seed()
         calls = []
 
-        def fake_search(client, name, state, category, kind=None, limit=12):
+        def fake_search(client, name, state, category, kind=None, limit=12,
+                        settings=None, diag=None):
             calls.append(limit)
             return ["https://co.franklin.oh.us/lodging.pdf"] if calls else []
 
@@ -478,6 +479,80 @@ class FetcherTests(DbTest):
         pages, _ = self.crawl_item(self.settings(web_search="1"))
         urls = [p["url"] for p in pages]
         self.assertIn("https://co.franklin.oh.us/lodging.pdf", urls)
+
+
+class BothEnginesReportSearchTests(DbTest):
+    """A blocked search engine has to look the same on either transport.
+
+    The Crawlee engine and the legacy loop take different paths to the same
+    ledger rows. If only one of them counted a refused search, a throttled
+    night would read as thorough depending on which interpreter was running.
+    """
+
+    def setUp(self):
+        super().setUp()
+        try:
+            from collector import crawl, fetcher, store
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl, self.fetcher, self.store = crawl, fetcher, store
+        self.undo = _install_fake_crawlee()
+        store.apply_schema(self.conn)
+        self.geoid = self.place(geoid="39049", name="Franklin County",
+                                kind="county", pop=1300000)
+        self.run_id = store.start_run(self.conn, "test")
+        _FakeCrawler.pages = {}
+        _FakeCrawler.robots_blocked = set()
+        _FakeCrawler.broken = set()
+        _FakeCrawler.started = []
+        self._real_ddg = crawl._ddg_search
+        self._real_bing = crawl._bing_search
+        self._real_seeds = crawl.seeds_for
+        # Every engine refuses: the (urls, blocked) contract both search
+        # helpers return.
+        crawl._ddg_search = lambda *a, **kw: ([], True)
+        crawl._bing_search = lambda *a, **kw: ([], True)
+        crawl.seeds_for = lambda *a, **kw: []
+
+    def tearDown(self):
+        self.crawl._ddg_search = self._real_ddg
+        self.crawl._bing_search = self._real_bing
+        self.crawl.seeds_for = self._real_seeds
+        self.undo()
+        super().tearDown()
+
+    def _settings(self, **over):
+        s = dict(self.store.get_all(self.conn))
+        s.update({"web_search": "1", "browser_render": "0", "delay_seconds": "0",
+                  "search_provider": "scrape", "search_api_key": ""})
+        s.update(over)
+        return s
+
+    def test_crawlee_engine_reports_the_block(self):
+        diag = self.crawl.new_diag()
+        self.fetcher.crawl_item(
+            self.conn, None, self._settings(), self.run_id, self.geoid,
+            "lodging_meals", "Franklin County", "OH", diag=diag)
+        self.assertTrue(diag["queries"])
+        self.assertEqual(diag["blocked"], diag["queries"])
+        self.assertIn("blocked", self.crawl.search_note(diag))
+
+    def test_legacy_loop_reports_the_block(self):
+        diag = self.crawl.new_diag()
+        self.crawl.crawl_item_legacy(
+            self.conn, None, self._settings(use_crawlee="0"), self.run_id,
+            self.geoid, "lodging_meals", "Franklin County", "OH", diag=diag)
+        self.assertTrue(diag["queries"])
+        self.assertEqual(diag["blocked"], diag["queries"])
+        self.assertIn("blocked", self.crawl.search_note(diag))
+
+    def test_dispatcher_fills_a_diag_it_was_not_given(self):
+        """crawl_item creates its own counters when a caller omits them, so
+        neither engine can end up counting into nothing."""
+        pages, text = self.crawl.crawl_item(
+            self.conn, None, self._settings(), self.run_id, self.geoid,
+            "lodging_meals", "Franklin County", "OH")
+        self.assertEqual(pages, [])
 
 
 class UnavailableTests(unittest.TestCase):

@@ -11,21 +11,24 @@
   <div class="shell">
     <aside class="rail">
       <p class="mark">Tax Database</p>
-      <p class="mark-sub">Collector · TrueNAS</p>
+      <p class="mark-sub">Collector</p>
       <nav>
-        <a href="/" class="{{ 'on' if nav=='dash' else '' }}"><span>Dashboard</span></a>
-        <a href="/queue" class="{{ 'on' if nav=='queue' else '' }}"><span>Work queue</span>
-          {% if stats.pending %}<span class="count">{{ stats.pending }}</span>{% endif %}</a>
-        <a href="/review" class="{{ 'on' if nav=='review' else '' }}"><span>Review</span>
+        <a href="/" class="{{ 'on' if nav=='dash' else '' }}"><span>Home</span></a>
+        <a href="/review" class="{{ 'on' if nav=='review' else '' }}"><span>Needs you</span>
           {% if stats.needs_review %}<span class="count">{{ stats.needs_review }}</span>{% endif %}</a>
-        <a href="/manual" class="{{ 'on' if nav=='manual' else '' }}"><span>Manual entry</span></a>
-        <a href="/runs" class="{{ 'on' if nav=='runs' else '' }}"><span>Crawl runs</span></a>
-        <a href="/settings" class="{{ 'on' if nav=='settings' else '' }}"><span>Keys &amp; crawl</span></a>
+        <a href="/manual" class="{{ 'on' if nav=='manual' else '' }}"><span>Add a source</span></a>
+        <a href="/data" class="{{ 'on' if nav=='data' else '' }}"><span>The data</span></a>
+      </nav>
+      <p class="rail-label">More</p>
+      <nav class="secondary">
+        <a href="/queue" class="{{ 'on' if nav=='queue' else '' }}"><span>Work list</span></a>
+        <a href="/runs" class="{{ 'on' if nav=='runs' else '' }}"><span>Activity log</span></a>
+        <a href="/settings" class="{{ 'on' if nav=='settings' else '' }}"><span>Settings</span></a>
       </nav>
       <div class="rail-foot">
         <p class="pulse {{ 'live' if worker.state=='running' else '' }}">
           <span class="dot"></span>
-          {{ worker.state }}{% if worker.mode %} · {{ worker.mode }}{% endif %}
+          <span id="rail-state">{{ 'collecting' if worker.state=='running' else worker.state }}</span>
         </p>
         <p class="path">{{ stats.db_path }}</p>
       </div>

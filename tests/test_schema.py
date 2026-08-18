@@ -10,8 +10,8 @@ EXPECTED_TABLES = {
 }
 
 EXPECTED_VIEWS = {
-    "v_current_tax", "v_sunset_watch", "v_live_grant", "v_headroom",
-    "v_near_miss", "v_measure_capture_gap", "v_coverage",
+    "v_current_tax", "v_sunset_watch", "v_live_grant", "v_live_threshold",
+    "v_headroom", "v_near_miss", "v_measure_capture_gap", "v_coverage",
 }
 
 

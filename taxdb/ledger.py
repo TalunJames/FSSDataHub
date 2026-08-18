@@ -8,7 +8,7 @@ first 500 rows cover 40% of the U.S. population or 0.4% of it.
 import math
 
 from . import db
-from .vocab import CATEGORIES, WORK_STATUSES
+from .vocab import PASS_KINDS, WORK_CATEGORIES, WORK_STATUSES
 
 KIND_WEIGHT = {"state": 1000, "county": 100, "place": 10, "mcd": 5, "school": 20}
 
@@ -23,10 +23,13 @@ def priority_for(kind, population):
 def plan(conn, states=None, kinds=("county", "place"), categories=None,
          min_pop=0, batch=None, limit=None):
     """Create work items for the selected jurisdictions x categories."""
-    categories = list(categories or CATEGORIES.keys())
+    categories = list(categories or WORK_CATEGORIES.keys())
     for c in categories:
-        if c not in CATEGORIES:
+        if c not in WORK_CATEGORIES:
             raise SystemExit("unknown category %r" % c)
+    # A pass only makes sense against the kind of jurisdiction that publishes
+    # it: state framework at the state, elections at the county.
+    fixed = {c: PASS_KINDS[c] for c in categories if c in PASS_KINDS}
 
     sql = ("SELECT geoid, kind, population FROM jurisdiction "
            "WHERE kind IN (%s)" % ",".join("?" * len(kinds)))
@@ -46,6 +49,8 @@ def plan(conn, states=None, kinds=("county", "place"), categories=None,
     for row in conn.execute(sql, params).fetchall():
         pri = priority_for(row["kind"], row["population"])
         for cat in categories:
+            if cat in fixed and row["kind"] not in fixed[cat]:
+                continue
             status = "pending"
             if _has_bulk(conn, row["geoid"], cat):
                 status = "needs_review"
@@ -61,9 +66,16 @@ def plan(conn, states=None, kinds=("county", "place"), categories=None,
 
 
 def claim(conn, limit=10, states=None, categories=None, batch=None, kinds=None,
-          min_pop=None):
-    """Take the next N pending items and mark them in progress."""
+          min_pop=None, max_attempts=None):
+    """Take the next N pending items and mark them in progress.
+
+    max_attempts keeps a jurisdiction whose rate page cannot be found from
+    recycling forever at the head of the queue. Items that hit the ceiling are
+    parked at 'blocked' so they are visible rather than silently dropped.
+    """
     park_bulk_covered(conn)
+    if max_attempts:
+        block_exhausted(conn, max_attempts)
     sql = ("SELECT w.id, w.geoid, w.category, w.priority FROM work_item w "
            "JOIN jurisdiction j ON j.geoid = w.geoid WHERE w.status = 'pending' "
            "AND NOT EXISTS (SELECT 1 FROM tax_instrument t "
@@ -85,6 +97,9 @@ def claim(conn, limit=10, states=None, categories=None, batch=None, kinds=None,
     if min_pop:
         sql += " AND COALESCE(j.population,0) >= ?"
         params.append(min_pop)
+    if max_attempts:
+        sql += " AND w.attempts < ?"
+        params.append(max_attempts)
     sql += " ORDER BY w.priority DESC, w.geoid LIMIT ?"
     params.append(limit)
 
@@ -148,3 +163,71 @@ def status_report(conn, states=None):
         params += [s.upper() for s in states]
     sql += " GROUP BY j.state_usps, w.status ORDER BY j.state_usps"
     return conn.execute(sql, params).fetchall()
+
+
+def block_exhausted(conn, max_attempts):
+    """Park pending items that have burned through their attempts."""
+    cur = conn.execute(
+        "UPDATE work_item SET status='blocked', updated_at=?, "
+        "last_error=COALESCE(last_error,'') || ' | gave up after ' || attempts || "
+        "' attempts; needs a source by hand' "
+        "WHERE status='pending' AND attempts >= ?",
+        (db.now(), max_attempts))
+    conn.commit()
+    return cur.rowcount
+
+
+def requeue_stale(conn, days=365, limit=500):
+    """Send long-finished items back to pending so the data refreshes itself.
+
+    Rates change, sunsets arrive, and a row researched two years ago is a
+    liability rather than an asset. Attempts reset: this is a fresh look, not
+    a retry of a failure.
+    """
+    rows = conn.execute(
+        "SELECT id FROM work_item WHERE status IN ('complete','no_data') "
+        "AND completed_at IS NOT NULL "
+        "AND completed_at < datetime('now', ?) ORDER BY priority DESC LIMIT ?",
+        ("-%d days" % int(days), limit)).fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE work_item SET status='pending', attempts=0, claimed_at=NULL, "
+            "last_error='refresh: last researched more than %d days ago', "
+            "updated_at=? WHERE id=?" % int(days), (db.now(), r["id"]))
+    conn.commit()
+    return len(rows)
+
+
+def unplanned(conn, categories, states=None, kinds=("county", "place"), limit=250):
+    """Jurisdictions with no work item yet, most populous first.
+
+    This is what lets the collector keep going without anyone drawing a slice
+    by hand: it always knows the next most valuable thing nobody has planned.
+    """
+    sql = ("SELECT j.geoid, j.kind, j.population FROM jurisdiction j "
+           "WHERE j.kind IN (%s) AND NOT EXISTS ("
+           "  SELECT 1 FROM work_item w WHERE w.geoid = j.geoid "
+           "  AND w.category IN (%s))" % (",".join("?" * len(kinds)),
+                                          ",".join("?" * len(categories))))
+    params = list(kinds) + list(categories)
+    if states:
+        sql += " AND j.state_usps IN (%s)" % ",".join("?" * len(states))
+        params += [s.upper() for s in states]
+    sql += " ORDER BY COALESCE(j.population,0) DESC LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def states_missing_pass(conn, pass_name, states=None):
+    """States with no work item for a pass yet, most populous first."""
+    kinds = PASS_KINDS.get(pass_name, ("state",))
+    sql = ("SELECT DISTINCT j.state_usps FROM jurisdiction j "
+           "WHERE j.kind IN (%s) AND NOT EXISTS ("
+           "  SELECT 1 FROM work_item w WHERE w.geoid = j.geoid "
+           "  AND w.category = ?)" % ",".join("?" * len(kinds)))
+    params = list(kinds) + [pass_name]
+    if states:
+        sql += " AND j.state_usps IN (%s)" % ",".join("?" * len(states))
+        params += [s.upper() for s in states]
+    sql += " ORDER BY j.state_usps"
+    return [r["state_usps"] for r in conn.execute(sql, params).fetchall()]

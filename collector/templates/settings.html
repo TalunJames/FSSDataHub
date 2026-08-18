@@ -1,14 +1,35 @@
 {% extends "base.html" %}
-{% block title %}Keys &amp; crawl{% endblock %}
+{% block title %}Settings{% endblock %}
 {% block body %}
 <header class="page">
   <div>
-    <h1>Keys &amp; crawl</h1>
-    <p class="lede">API keys stay in the SQLite file on your dataset. Environment variables fill empty keys on first boot only.</p>
+    <h1>Settings</h1>
+    <p class="lede">The collector runs without any of this once a provider key is set. Keys stay in the SQLite file on your dataset.</p>
   </div>
 </header>
 
 <form id="settings-form">
+  <section class="panel">
+    <h2>Running on its own</h2>
+    <p class="hint">With autopilot on, nobody has to choose what to research. It sets up the database, loads the free national files, works out each state's rules, then works through counties and cities in population order and re-checks records as they age.</p>
+    <label class="check"><input type="checkbox" name="autopilot_enabled" value="1" {% if settings.autopilot_enabled=='1' %}checked{% endif %}> Decide what to research next automatically (recommended)</label>
+    <label class="check"><input type="checkbox" name="autopilot_bulk" value="1" {% if settings.autopilot_bulk=='1' %}checked{% endif %}> Load the free national bulk files first (published sales tax rates, Census collections)</label>
+    <label class="check"><input type="checkbox" name="autopilot_statutes" value="1" {% if settings.autopilot_statutes=='1' %}checked{% endif %}> Download state statute text so research packets cite real law</label>
+    <label class="check"><input type="checkbox" name="autopilot_elections" value="1" {% if settings.autopilot_elections=='1' %}checked{% endif %}> Also research past ballot measures, county by county</label>
+    <div class="row">
+      <label>Places added to the list per step
+        <input type="number" name="autopilot_chunk" min="10" max="5000" value="{{ settings.autopilot_chunk }}">
+      </label>
+      <label>Re-check records older than <span class="dim">days</span>
+        <input type="number" name="refresh_days" min="0" max="3650" value="{{ settings.refresh_days }}">
+      </label>
+      <label>Give up on a place after <span class="dim">tries</span>
+        <input type="number" name="max_attempts" min="1" max="20" value="{{ settings.max_attempts }}">
+      </label>
+    </div>
+    <p class="hint">Setting re-check days to 0 turns refreshing off. Items that run out of tries move to <em>stuck</em> on the work list instead of cycling forever.</p>
+  </section>
+
   <section class="panel">
     <h2>Extractor</h2>
     <label>Provider
@@ -104,6 +125,19 @@
       <label>Max depth <input type="number" name="max_depth" value="{{ settings.max_depth }}"></label>
     </div>
     <label class="check"><input type="checkbox" name="web_search" value="1" {% if settings.web_search=='1' %}checked{% endif %}> Search the web for the county/city site and tax PDFs when the catalog is not enough</label>
+    <div class="grid2">
+      <label>Search service
+        <select name="search_provider">
+          {% for p in searches %}
+          <option value="{{ p }}" {% if settings.search_provider==p %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Search API key <span class="dim">Brave Search</span>
+        <input name="search_api_key" type="password" value="{{ settings.search_api_key }}" autocomplete="off">
+      </label>
+    </div>
+    <p class="hint">Without a key the crawler scrapes public result pages, which get throttled and blocked. When that happens the run says so rather than reporting an empty result as if it were an answer. <code>auto</code> uses the key when one is present.</p>
     <label class="check"><input type="checkbox" name="strict_robots" value="1" {% if settings.strict_robots=='1' %}checked{% endif %}> Fail closed if robots.txt cannot be fetched <span class="dim">legacy engine only</span></label>
     <label>User-Agent <input name="user_agent" value="{{ settings.user_agent }}"></label>
   </section>
@@ -121,6 +155,22 @@
     <div class="row">
       <label>Browser pages / item <input type="number" name="max_render_pages" value="{{ settings.max_render_pages }}"></label>
       <label>Thin page under N chars <input type="number" name="render_min_chars" value="{{ settings.render_min_chars }}"></label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Do it by hand</h2>
+    <p class="hint">Only needed to jump the queue: research a particular state now, or re-pull a bulk file.</p>
+    <div class="row">
+      <div class="burst">
+        <input id="sst-states" placeholder="OH WA (empty = all 24)" style="width:14rem">
+        <button type="button" data-action="sst">Reload published sales tax rates</button>
+      </div>
+      <button type="button" data-action="cog">Reload Census collections</button>
+      <div class="burst">
+        <input id="statute-state" placeholder="OH" maxlength="2" style="width:3.5rem;text-transform:uppercase">
+        <button type="button" data-action="statutes">Fetch that state's statutes</button>
+      </div>
     </div>
   </section>
 

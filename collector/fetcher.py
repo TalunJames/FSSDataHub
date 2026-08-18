@@ -17,6 +17,7 @@ back to the legacy loop when it fails, so an older interpreter still runs.
 """
 
 import asyncio
+import functools
 import logging
 import os
 from datetime import timedelta
@@ -88,16 +89,23 @@ def _plan(settings):
     }
 
 
-def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
-    """Same contract as `crawl.crawl_item_legacy`: (pages, combined_text)."""
+def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
+               diag=None):
+    """Same contract as `crawl.crawl_item_legacy`: (pages, combined_text).
+
+    diag collects search counters so a blocked search engine is reported the
+    same way whichever engine ran.
+    """
     from . import crawl
 
+    if diag is None:
+        diag = crawl.new_diag()
     j = conn.execute("SELECT kind FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     kind = j["kind"] if j else None
 
     # Search is sync httpx and runs before the loop opens, as it always has.
     seed_urls = crawl.item_seeds(
-        conn, client, settings, geoid, category, name, state, kind)
+        conn, client, settings, geoid, category, name, state, kind, diag=diag)
     if not seed_urls:
         return [], ""
 
@@ -111,7 +119,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
     try:
         asyncio.run(_run_item(
             conn, settings, plan, run_id, geoid, category, name, state,
-            seed_urls, ctx, client, kind))
+            seed_urls, ctx, client, kind, diag))
     except Exception as exc:
         # Hand the item to the legacy loop only if nothing was recorded yet.
         # Once pages are in the ledger, falling back would archive them twice.
@@ -126,7 +134,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state):
 
 
 async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
-                    seed_urls, ctx, client, kind):
+                    seed_urls, ctx, client, kind, diag=None):
     from . import crawl
 
     await _http_round(conn, plan, run_id, geoid, category, name, state,
@@ -138,7 +146,8 @@ async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
     if (spent < plan["max_pages"] and store.as_bool(settings.get("web_search"))
             and not crawl._has_signal(ctx["pages"])):
         extra = await asyncio.to_thread(
-            crawl.search_web, client, name, state, category, kind, 16)
+            functools.partial(crawl.search_web, client, name, state, category,
+                              kind=kind, limit=16, settings=settings, diag=diag))
         already = set(seed_urls)
         extra = [u for u in extra if u not in already]
         if extra:
@@ -236,7 +245,7 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
         if depth >= plan["max_depth"] or not blob or "html" not in ctype:
             return
         targets = crawl.follow_targets(url, final, blob, depth, ctx["seed_hosts"],
-                                       name=name, state=state)
+                                       name=name, state=state, category=category)
         # Documents first: the page budget can run out before the queue does.
         targets.sort(key=lambda pair: not pair[1])
         if targets:

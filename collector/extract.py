@@ -18,22 +18,42 @@ from taxdb.vocab import validate_finding
 SYSTEM = """You are a tax-research extractor. You read official pages and fill
 a JSON findings file for a US local-tax database.
 
+The packet in the user message says which sections to return. Return only the
+sections it asks for. The sections are:
+
+  findings    tax rates and caps in force for one jurisdiction
+  measures    revenue measures put to voters, and the certified result
+  thresholds  what share of the vote a class of measure needs, by statute
+  grants      what a state permits its local governments to levy, and the cap
+  profile     one state's statutory frame (a single object, not an array)
+
 Rules:
 - Every claim needs a source.url that appears in the provided documents.
-- Prefer primary law (statutes, ordinances) and the state agency of record.
+- Prefer primary law (statutes, ordinances) and the agency of record.
 - If a tax is legally available but not imposed, status is "authorized_not_levied".
 - If barred by state law, status is "prohibited" with the cite.
 - If you cannot find a rate, status is "unknown" and say why in notes.
 - Do not estimate, interpolate from neighbors, or invent numbers.
-- Give the rate exactly as published, with its unit. Do not convert mills to percent.
+- Give the rate exactly as published, with its unit. Do not convert mills to
+  percent. Percentages are percentages: two-thirds is 66.67, not 0.6667.
 - Dates must be ISO YYYY-MM-DD.
 - confidence is high only when the figure is printed on a primary source.
-- Every finding must include source_quote: a short verbatim phrase copied from
-  the documents that contains the rate, the prohibition, or the authorization.
+- Every tax finding must include source_quote: a short verbatim phrase copied
+  from the documents that contains the rate, the prohibition, or the
+  authorization.
+- For measures, record the vote counts as printed and let the percentage be
+  computed. Certified results only, never election-night returns.
+- For thresholds and grants, the statutory cite is required.
 - Return ONLY valid JSON matching the schema in the user message.
-- If the documents do not support a finding, omit it rather than guess.
-- Use only the allowed instrument_code values listed in the packet.
+- If the documents do not support a row, omit it rather than guess. An empty
+  array is a real answer.
+- Use only the allowed category and instrument_code values listed in the packet.
 """
+
+# Doc keys ingest knows how to write. A framework or elections packet returns
+# none of them under "findings", so accepting only that key silently threw
+# away every threshold and every measure a model found.
+SECTION_KEYS = ("findings", "measures", "thresholds", "grants", "profile")
 
 
 class ExtractError(Exception):
@@ -115,12 +135,19 @@ def extract(settings, packet_text, documents_text, researcher="collector", image
     except ExtractError as exc:
         return raw, None, str(exc)
 
-    doc.setdefault("schema_version", "1.0")
+    doc.setdefault("schema_version", "1.1")
     doc.setdefault("researcher", researcher)
     doc.setdefault("extraction_method", "agent_research")
-    findings = doc.get("findings")
-    if not isinstance(findings, list):
-        return raw, None, "JSON has no findings array"
+
+    present = [k for k in SECTION_KEYS if doc.get(k) is not None]
+    if not present:
+        return raw, None, ("JSON has none of the expected sections (%s)"
+                           % ", ".join(SECTION_KEYS))
+    for key in present:
+        if key != "profile" and not isinstance(doc[key], list):
+            return raw, None, "%r must be an array" % key
+    if isinstance(doc.get("profile"), list) and len(doc["profile"]) == 1:
+        doc["profile"] = doc["profile"][0]
     return raw, doc, None
 
 

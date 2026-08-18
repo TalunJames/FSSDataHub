@@ -1,15 +1,34 @@
 {% extends "base.html" %}
-{% block title %}Work queue{% endblock %}
+{% block title %}Work list{% endblock %}
 {% block body %}
 <header class="page">
   <div>
-    <h1>Work queue</h1>
-    <p class="lede">Population-weighted. Plan a state on the dashboard, then crawl or fill by hand.</p>
+    <h1>Work list</h1>
+    <p class="lede">Everything queued, biggest places first. The collector adds to this on its own; you do not need to.</p>
   </div>
   <div class="row" style="flex:none">
-    <a class="btn" href="/">Dashboard</a>
+    <a class="btn" href="/">Home</a>
   </div>
 </header>
+
+<details class="panel adv">
+  <summary>Add a specific state to the list</summary>
+  <p class="hint">Autopilot works down the whole country by population. Use this to put one state at the front.</p>
+  <form id="plan-form" class="stack">
+    <label>States <span class="dim">two-letter codes, space or comma separated</span>
+      <input name="states" placeholder="OH MI PA" required>
+    </label>
+    <div class="row">
+      <label>Kinds <input name="kinds" value="county,place,state"></label>
+      <label>What to research <input name="categories" value="{{ settings.filter_categories }}"></label>
+    </div>
+    <div class="row">
+      <label>Minimum population <input type="number" name="min_pop" value="0"></label>
+      <label>Limit <input type="number" name="limit" placeholder="all"></label>
+      <button class="primary" type="submit" style="flex:none">Add to the list</button>
+    </div>
+  </form>
+</details>
 
 <form class="filters" method="get" action="/queue">
   <label>State

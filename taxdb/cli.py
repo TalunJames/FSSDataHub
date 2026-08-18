@@ -7,7 +7,7 @@ import sys
 
 from . import db, seed, ledger, packets, ingest, export, sources, archive, coverage
 from . import adapters
-from .vocab import CATEGORIES, COMPLETENESS
+from .vocab import CATEGORIES, COMPLETENESS, WORK_CATEGORIES
 
 
 def _fmt(n):
@@ -104,8 +104,11 @@ def cmd_ingest(args):
     if args.dry_run:
         print("dry run: %d valid, %d rejected" % (res["valid"], res["rejected"]))
     else:
-        print("wrote %d finding(s) across %d jurisdiction(s); marked needs_review"
-              % (res["written"], res.get("jurisdictions", 0)))
+        by_type = res.get("by_type") or {}
+        detail = ", ".join("%d %s" % (n, name) for name, n in sorted(by_type.items())
+                           if n) or "nothing"
+        print("wrote %d row(s) across %d jurisdiction(s): %s; marked needs_review"
+              % (res["written"], res.get("jurisdictions", 0), detail))
     for e in res["errors"]:
         print("  REJECTED %s" % e)
     return 0
@@ -452,7 +455,10 @@ def main(argv=None):
     s = sub.add_parser("plan", help="create work items")
     s.add_argument("--state", nargs="*", help="USPS codes, e.g. --state OH MI")
     s.add_argument("--kinds", help="comma list: county,place,mcd,state")
-    s.add_argument("--categories", help="comma list: %s" % ",".join(CATEGORIES))
+    s.add_argument("--categories",
+                   help="comma list: %s (the last two are research passes: "
+                        "framework runs per state, elections per county)"
+                        % ",".join(WORK_CATEGORIES))
     s.add_argument("--min-pop", type=int, default=0)
     s.add_argument("--batch")
     s.add_argument("--limit", type=int)
