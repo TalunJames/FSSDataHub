@@ -28,6 +28,12 @@ DEFAULTS = {
     "max_text_chars": "80000",
     "web_search": "1",
     "strict_robots": "0",
+    "use_crawlee": "1",                # off = sequential httpx loop
+    "concurrency": "4",                # parallel fetches within one item
+    "max_retries": "3",
+    "browser_render": "1",             # re-fetch thin pages in Chromium
+    "max_render_pages": "4",
+    "render_min_chars": "400",
     "user_agent": "TaxDatabaseCollector/0.3 (local tax research; TrueNAS)",
     "filter_states": "",
     "filter_kinds": "county,place,state",

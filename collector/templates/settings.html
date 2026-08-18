@@ -80,8 +80,24 @@
       <label>Max depth <input type="number" name="max_depth" value="{{ settings.max_depth }}"></label>
     </div>
     <label class="check"><input type="checkbox" name="web_search" value="1" {% if settings.web_search=='1' %}checked{% endif %}> Search the web for the county/city site and tax PDFs when the catalog is not enough</label>
-    <label class="check"><input type="checkbox" name="strict_robots" value="1" {% if settings.strict_robots=='1' %}checked{% endif %}> Fail closed if robots.txt cannot be fetched</label>
+    <label class="check"><input type="checkbox" name="strict_robots" value="1" {% if settings.strict_robots=='1' %}checked{% endif %}> Fail closed if robots.txt cannot be fetched <span class="dim">legacy engine only</span></label>
     <label>User-Agent <input name="user_agent" value="{{ settings.user_agent }}"></label>
+  </section>
+
+  <section class="panel">
+    <h2>Fetch engine</h2>
+    <label class="check"><input type="checkbox" name="use_crawlee" value="1" {% if settings.use_crawlee=='1' %}checked{% endif %}> Use Crawlee <span class="dim">retries, resume, and concurrency; off = one page at a time</span></label>
+    <div class="row">
+      <label>Parallel fetches / item <input type="number" name="concurrency" value="{{ settings.concurrency }}"></label>
+      <label>Retries per page <input type="number" name="max_retries" value="{{ settings.max_retries }}"></label>
+    </div>
+    <p class="dim">Seconds between requests above still caps the rate; Crawlee spends
+      that budget across hosts instead of idling between single fetches.</p>
+    <label class="check"><input type="checkbox" name="browser_render" value="1" {% if settings.browser_render=='1' %}checked{% endif %}> Re-fetch thin pages in a real browser <span class="dim">for county sites that render rate tables in JavaScript</span></label>
+    <div class="row">
+      <label>Browser pages / item <input type="number" name="max_render_pages" value="{{ settings.max_render_pages }}"></label>
+      <label>Thin page under N chars <input type="number" name="render_min_chars" value="{{ settings.render_min_chars }}"></label>
+    </div>
   </section>
 
   <button class="primary" type="submit">Save</button>
