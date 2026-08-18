@@ -4,7 +4,7 @@
 <header class="page">
   <div>
     <h1>Needs review</h1>
-    <p class="lede">AI and bulk ingest land here. Sign off only when the citation supports the rate.</p>
+    <p class="lede">Only items the second checker flagged (or could not verify) land here. Sign off only when the citation supports the rate.</p>
   </div>
   <div class="row" style="flex:none">
     <span class="tag" data-v="needs_review">{{ rows|length }} open</span>
@@ -23,6 +23,9 @@
       · <a href="/api/packet/{{ r.geoid }}?category={{ r.category }}">packet</a>
     </p>
   </header>
+  {% if r.last_error %}
+  <p class="hint flag-reason">⚑ {{ r.last_error }}</p>
+  {% endif %}
   {% set key = r.geoid ~ '/' ~ r.category %}
   {% set recs = findings.get(key, []) %}
   {% if recs %}
@@ -42,7 +45,7 @@
     </tbody>
   </table>
   {% else %}
-  <p class="hint">No current tax_instrument rows.{% if r.last_error %} {{ r.last_error }}{% endif %}</p>
+  <p class="hint">No current tax_instrument rows.</p>
   {% endif %}
   <div class="row" style="margin-top:.8rem;padding-top:.7rem;border-top:1px solid var(--line)">
     <button class="primary" data-review="complete" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">Accept</button>

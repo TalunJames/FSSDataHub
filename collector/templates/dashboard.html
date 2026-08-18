@@ -30,9 +30,18 @@
   <article><span class="k">Work items</span><strong id="stat-work">{{ stats.work_items }}</strong></article>
   <article><span class="k">Pending</span><strong id="stat-pending">{{ stats.pending }}</strong></article>
   <article><span class="k">Needs review</span><strong id="stat-review">{{ stats.needs_review }}</strong></article>
+  <article><span class="k">Done</span><strong id="stat-done">{{ stats.done }}</strong></article>
+  <article><span class="k">Auto-verified</span><strong id="stat-verified">{{ stats.auto_verified }}</strong></article>
   <article><span class="k">Tax records</span><strong id="stat-instruments">{{ stats.instruments }}</strong></article>
   <article><span class="k">Pages archived</span><strong id="stat-pages">{{ stats.pages }}</strong></article>
 </section>
+
+{% if stats.work_items %}
+<section class="panel progress-panel">
+  <div class="progressbar"><div class="progressbar-fill" id="progress-fill" style="width: {{ stats.pct_done }}%"></div></div>
+  <p class="hint" id="progress-line">{{ stats.done }} of {{ stats.work_items }} items researched ({{ stats.pct_done }}%) · {{ stats.needs_review }} flagged for review · {{ stats.pending }} pending</p>
+</section>
+{% endif %}
 
 <section class="split">
   <div class="panel">
@@ -132,6 +141,12 @@
       {% endif %}
     </div>
   </div>
+</section>
+
+<section class="panel">
+  <h2>Notifications</h2>
+  <p class="hint">Failed runs, failed uploads, and anything the second checker flagged. Auto-refreshes.</p>
+  <ul class="activity" id="activity-list"><li class="dim">Loading…</li></ul>
 </section>
 
 <section class="panel">

@@ -7,10 +7,12 @@ CREATE TABLE IF NOT EXISTS collector_setting (
     updated_at  TEXT
 );
 
+-- mode is deliberately unconstrained: the worker records burst, continuous,
+-- schedule, manual_url, seed, plan, fetch, cog, and statutes runs, and the
+-- list grows. A CHECK here once broke every bulk-adapter run.
 CREATE TABLE IF NOT EXISTS crawl_run (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    mode                TEXT NOT NULL CHECK (mode IN (
-                            'burst','continuous','schedule','manual_url','seed','plan')),
+    mode                TEXT NOT NULL,
     status              TEXT NOT NULL CHECK (status IN (
                             'running','ok','stopped','failed')),
     provider            TEXT,
@@ -85,6 +87,23 @@ CREATE TABLE IF NOT EXISTS intake_item (
 
 CREATE INDEX IF NOT EXISTS idx_intake_status ON intake_item(status, id);
 CREATE INDEX IF NOT EXISTS idx_intake_geoid ON intake_item(geoid, category);
+
+-- Second-checker verdicts. One row per checked (geoid, category) pass;
+-- 'flag' rows carry a JSON array of {code, instrument_code, reason}.
+CREATE TABLE IF NOT EXISTS check_result (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          INTEGER REFERENCES crawl_run(id),
+    geoid           TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    verdict         TEXT NOT NULL CHECK (verdict IN ('pass','flag','error')),
+    flags           TEXT,
+    provider        TEXT,
+    model           TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_check_geo ON check_result(geoid, category, id);
+CREATE INDEX IF NOT EXISTS idx_check_verdict ON check_result(verdict, id);
 
 CREATE TABLE IF NOT EXISTS interview_answer (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

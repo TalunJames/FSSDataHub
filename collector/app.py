@@ -20,7 +20,7 @@ from taxdb.vocab import (
 
 from . import crawl, extract, intake, interview, store, worker
 from .settings import (
-    SECRET_KEYS, VALID_CATEGORIES, VALID_KINDS, VALID_PROVIDERS, VALID_SCHEDULE,
+    ANTHROPIC_MODELS, VALID_KINDS, VALID_PROVIDERS, VALID_SCHEDULE,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,6 +92,7 @@ def _ctx(request, **extra):
         "ternary": sorted(TERNARY),
         "work_statuses": sorted(WORK_STATUSES),
         "providers": VALID_PROVIDERS,
+        "anthropic_models": ANTHROPIC_MODELS,
         "schedules": VALID_SCHEDULE,
         "kinds": VALID_KINDS,
         "extraction_methods": sorted(EXTRACTION_METHODS),
@@ -114,7 +115,9 @@ def _stats(conn):
         db_exists = False
     tot = n("SELECT COUNT(*) FROM work_item") if db_exists else 0
     pending = n("SELECT COUNT(*) FROM work_item WHERE status='pending'") if tot else 0
+    in_progress = n("SELECT COUNT(*) FROM work_item WHERE status='in_progress'") if tot else 0
     review = n("SELECT COUNT(*) FROM work_item WHERE status='needs_review'") if tot else 0
+    done = n("SELECT COUNT(*) FROM work_item WHERE status IN ('complete','no_data')") if tot else 0
     running = n("SELECT COUNT(*) FROM crawl_run WHERE status='running'")
     instruments = n("SELECT COUNT(*) FROM tax_instrument WHERE superseded_by IS NULL") if db_exists else 0
     pages = n("SELECT COUNT(*) FROM crawl_page")
@@ -122,11 +125,21 @@ def _stats(conn):
         intake_queued = n("SELECT COUNT(*) FROM intake_item WHERE status='queued'")
     except Exception:
         intake_queued = 0
+    try:
+        auto_verified = n(
+            "SELECT COUNT(*) FROM (SELECT geoid, category FROM check_result "
+            "WHERE verdict='pass' GROUP BY geoid, category)")
+    except Exception:
+        auto_verified = 0
     return {
         "jurisdictions": n_j,
         "work_items": tot,
         "pending": pending,
+        "in_progress": in_progress,
         "needs_review": review,
+        "done": done,
+        "pct_done": round(100.0 * done / tot, 1) if tot else 0,
+        "auto_verified": auto_verified,
         "runs_active": running,
         "instruments": instruments,
         "pages": pages,
@@ -255,6 +268,7 @@ def api_status(_: bool = Depends(_auth)):
         "worker": snap,
         "continuous_enabled": store.as_bool(s.get("continuous_enabled")),
         "schedule_enabled": store.as_bool(s.get("schedule_enabled")),
+        "checker_enabled": store.as_bool(s.get("checker_enabled")),
         "provider": s.get("provider"),
     }
 
@@ -265,23 +279,91 @@ async def api_settings(request: Request, _: bool = Depends(_auth)):
     conn = store.connect()
     try:
         current = store.get_all(conn)
-        updates = {}
-        for k, v in body.items():
-            if k not in current and k not in SECRET_KEYS:
-                continue
-            if k in SECRET_KEYS and isinstance(v, str) and set(v) <= set("*") | set("0123456789"):
-                # ignore masked placeholder unless it looks like a new key (has non-star)
-                if "*" in v:
-                    continue
-            if k == "provider" and v not in VALID_PROVIDERS:
-                raise HTTPException(400, "invalid provider")
-            if k == "schedule_kind" and v not in VALID_SCHEDULE:
-                raise HTTPException(400, "invalid schedule")
-            updates[k] = v if v is None else str(v)
+        if body.get("provider") is not None and body["provider"] not in VALID_PROVIDERS:
+            raise HTTPException(400, "invalid provider")
+        if body.get("schedule_kind") is not None and body["schedule_kind"] not in VALID_SCHEDULE:
+            raise HTTPException(400, "invalid schedule")
+        updates = store.sanitize_updates(current, body)
         store.put_many(conn, updates)
     finally:
         conn.close()
     return {"ok": True, "updated": sorted(updates)}
+
+
+@app.post("/api/provider/test")
+def api_provider_test(_: bool = Depends(_auth)):
+    """One tiny completion against the saved provider settings."""
+    conn = store.connect()
+    try:
+        s = store.get_all(conn)
+    finally:
+        conn.close()
+    if (s.get("provider") or "none") == "none":
+        return {"ok": False, "error": "provider is 'none' — pick one and save first"}
+    raw, err = extract.chat(
+        s, "Reply with the single word: ready",
+        system="You are a connectivity test. Reply with exactly one word: ready")
+    return {
+        "ok": not err,
+        "provider": s.get("provider"),
+        "model": extract.default_model(s),
+        "response": (raw or "").strip()[:200],
+        "error": err,
+    }
+
+
+@app.get("/api/activity")
+def api_activity(limit: int = 30, _: bool = Depends(_auth)):
+    """Recent problems and checker verdicts, newest first."""
+    limit = max(1, min(int(limit or 30), 100))
+    events = []
+    conn = store.connect()
+    try:
+        for r in conn.execute(
+                "SELECT id, mode, status, message, "
+                "COALESCE(finished_at, started_at) AS ts FROM crawl_run "
+                "WHERE status IN ('failed','stopped') "
+                "ORDER BY id DESC LIMIT ?", (limit,)):
+            events.append({
+                "kind": "run_" + r["status"], "ts": r["ts"],
+                "title": "Run #%d (%s) %s" % (r["id"], r["mode"], r["status"]),
+                "detail": r["message"] or "", "href": "/runs?run_id=%d" % r["id"],
+            })
+        for r in conn.execute(
+                "SELECT id, geoid, category, filename, url, error, "
+                "COALESCE(finished_at, created_at) AS ts FROM intake_item "
+                "WHERE status='failed' ORDER BY id DESC LIMIT ?", (limit,)):
+            events.append({
+                "kind": "intake_failed", "ts": r["ts"],
+                "title": "Intake #%d failed (%s)" % (
+                    r["id"], r["filename"] or r["url"] or "item"),
+                "detail": r["error"] or "", "href": "/manual",
+            })
+        for r in conn.execute(
+                "SELECT c.id, c.geoid, c.category, c.verdict, c.flags, c.created_at AS ts, "
+                "j.name, j.state_usps FROM check_result c "
+                "LEFT JOIN jurisdiction j ON j.geoid=c.geoid "
+                "WHERE c.verdict IN ('flag','error') "
+                "ORDER BY c.id DESC LIMIT ?", (limit,)):
+            try:
+                flags = json.loads(r["flags"]) if r["flags"] else []
+            except ValueError:
+                flags = []
+            detail = "; ".join(
+                "%s: %s" % (f.get("instrument_code") or "?", f.get("reason") or "")
+                for f in flags[:3]) or "checker could not run"
+            events.append({
+                "kind": "check_" + r["verdict"], "ts": r["ts"],
+                "title": "%s (%s) / %s %s" % (
+                    r["name"] or r["geoid"], r["state_usps"] or "?",
+                    r["category"],
+                    "flagged" if r["verdict"] == "flag" else "check errored"),
+                "detail": detail, "href": "/review",
+            })
+    finally:
+        conn.close()
+    events.sort(key=lambda e: e["ts"] or "", reverse=True)
+    return events[:limit]
 
 
 @app.post("/api/crawl/toggle")

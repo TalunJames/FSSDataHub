@@ -28,7 +28,9 @@ def today():
     return datetime.date.today().isoformat()
 
 
-def connect(create=True, path=None):
+def connect(create=True, path=None, apply=True):
+    """Open a connection. apply=False skips the schema pass for callers
+    (the web collector) that already applied it once this process."""
     path = db_path() if path is None else path
     if path != ":memory:" and not create and not os.path.exists(path):
         raise SystemExit("no database at %s -- run `taxdb init` first" % path)
@@ -36,7 +38,7 @@ def connect(create=True, path=None):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
-    if create or path == ":memory:" or os.path.exists(path):
+    if apply and (create or path == ":memory:" or os.path.exists(path)):
         apply_schema(conn)
     return conn
 
