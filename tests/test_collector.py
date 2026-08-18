@@ -103,6 +103,119 @@ class CrawlPolicyTests(unittest.TestCase):
         self.assertIn("filetype:pdf", qs)
         self.assertIn("site:.gov", qs)
 
+    def test_seed_hosts_lowercased(self):
+        hosts = self.crawl.seed_hosts_for([
+            "https://TAX.Ohio.GOV/rates", "https://co.franklin.oh.us/x", "notaurl"])
+        self.assertEqual(hosts, {"tax.ohio.gov", "co.franklin.oh.us"})
+
+
+class PageRecordTests(unittest.TestCase):
+    """The page shape both fetch engines must produce identically."""
+
+    def setUp(self):
+        try:
+            from collector import crawl
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl = crawl
+
+    def test_html_page_record(self):
+        blob = b"<html><head><title>Lodging Tax</title></head><body>" \
+               b"<p>The transient occupancy tax is 3 percent.</p></body></html>"
+        page = self.crawl.page_record(
+            "https://co.franklin.oh.us/tax", "https://co.franklin.oh.us/tax",
+            200, "text/html; charset=utf-8", blob)
+        self.assertEqual(page["title"], "Lodging Tax")
+        self.assertIn("3 percent", page["text"])
+        self.assertIsNone(page["error"])
+        self.assertEqual(page["robots_allowed"], 1)
+        self.assertEqual(len(page["sha256"]), 64)
+
+    def test_http_error_status_becomes_error(self):
+        page = self.crawl.page_record(
+            "https://x.gov/a", "https://x.gov/a", 404, "text/html", b"gone")
+        self.assertEqual(page["error"], "HTTP 404")
+
+    def test_error_page_has_same_keys(self):
+        good = self.crawl.page_record(
+            "https://x.gov/a", "https://x.gov/a", 200, "text/html", b"<p>hi</p>")
+        bad = self.crawl.error_page("https://x.gov/a", "timed out")
+        self.assertEqual(set(good), set(bad))
+        self.assertEqual(bad["blob"], b"")
+        self.assertEqual(bad["error"], "timed out")
+
+    def test_robots_page_flagged_not_allowed(self):
+        page = self.crawl.error_page(
+            "https://x.gov/a", "robots.txt disallows this URL",
+            robots_allowed_flag=0)
+        self.assertEqual(page["robots_allowed"], 0)
+
+    def test_follow_targets_marks_documents_preferred(self):
+        blob = b"""<html><body>
+        <a href="/docs/rates.pdf">Rate table</a>
+        <a href="/treasurer">Treasurer</a>
+        <a href="/parks">Parks</a>
+        <a href="https://facebook.com/county">Facebook</a>
+        </body></html>"""
+        targets = self.crawl.follow_targets(
+            "https://co.franklin.oh.us/", "https://co.franklin.oh.us/", blob, 0,
+            {"co.franklin.oh.us"}, name="Franklin County", state="OH")
+        found = dict(targets)
+        self.assertTrue(found["https://co.franklin.oh.us/docs/rates.pdf"])
+        self.assertIn("https://co.franklin.oh.us/treasurer", found)
+        self.assertNotIn("https://co.franklin.oh.us/parks", found)
+        self.assertFalse(any("facebook" in u for u in found))
+
+    def test_follow_targets_skips_offsite(self):
+        blob = b'<html><body><a href="https://vendor-cms.com/tax">Tax</a></body></html>'
+        targets = self.crawl.follow_targets(
+            "https://co.franklin.oh.us/", "https://co.franklin.oh.us/", blob, 0,
+            {"co.franklin.oh.us"}, name="Franklin County", state="OH")
+        self.assertEqual(targets, [])
+
+
+class EngineSelectionTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            from collector import crawl, fetcher
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl = crawl
+        self.fetcher = fetcher
+
+    def test_setting_off_disables_crawlee(self):
+        self.assertFalse(self.crawl.crawlee_enabled({"use_crawlee": "0"}))
+
+    def test_setting_on_follows_import(self):
+        self.assertEqual(
+            self.crawl.crawlee_enabled({"use_crawlee": "1"}),
+            self.fetcher.available())
+
+    def test_delay_becomes_rate_cap(self):
+        self.assertAlmostEqual(self.fetcher._tasks_per_minute({"delay_seconds": "2.0"}), 30.0)
+        self.assertAlmostEqual(self.fetcher._tasks_per_minute({"delay_seconds": "0.5"}), 120.0)
+        self.assertEqual(self.fetcher._tasks_per_minute({"delay_seconds": "0"}), float("inf"))
+
+    def test_thin_html_marked_for_render(self):
+        plan = {"render_min": 400}
+        thin = {"blob": b"<html></html>", "content_type": "text/html",
+                "text": "Home About Contact", "error": None}
+        self.assertTrue(self.fetcher._is_thin(thin, plan))
+        fat = dict(thin, text="x" * 500)
+        self.assertFalse(self.fetcher._is_thin(fat, plan))
+
+    def test_pdf_and_rendered_pages_never_re_rendered(self):
+        plan = {"render_min": 400}
+        pdf = {"blob": b"%PDF", "content_type": "application/pdf", "text": "",
+               "error": None}
+        self.assertFalse(self.fetcher._is_thin(pdf, plan))
+        already = {"blob": b"<html></html>", "content_type": "text/html",
+                   "text": "", "error": None, "rendered": True}
+        self.assertFalse(self.fetcher._is_thin(already, plan))
+        failed = {"blob": b"", "content_type": "text/html", "text": "",
+                  "error": "timed out"}
+        self.assertFalse(self.fetcher._is_thin(failed, plan))
+
 
 class StoreTests(DbTest):
     def setUp(self):
