@@ -8,7 +8,7 @@
   </div>
 </header>
 
-<form id="settings-form" class="stack">
+<form id="settings-form">
   <section class="panel">
     <h2>Extractor</h2>
     <label>Provider
@@ -60,21 +60,25 @@
         <input type="number" name="schedule_weekday" min="0" max="6" value="{{ settings.schedule_weekday }}">
       </label>
     </div>
-    <label>Burst / scheduled batch size
-      <input type="number" name="burst_size" min="1" max="500" value="{{ settings.burst_size }}">
-    </label>
-    <label>Researcher label <input name="researcher" value="{{ settings.researcher }}"></label>
+    <div class="grid2">
+      <label>Burst / scheduled batch size
+        <input type="number" name="burst_size" min="1" max="500" value="{{ settings.burst_size }}">
+      </label>
+      <label>Researcher label <input name="researcher" value="{{ settings.researcher }}"></label>
+    </div>
   </section>
 
   <section class="panel">
     <h2>Scope &amp; politeness</h2>
-    <label>States filter <span class="dim">empty = any planned item</span>
-      <input name="filter_states" value="{{ settings.filter_states }}" placeholder="OH,MI">
-    </label>
-    <label>Kinds <input name="filter_kinds" value="{{ settings.filter_kinds }}"></label>
+    <div class="grid2">
+      <label>States filter <span class="dim">empty = any planned item</span>
+        <input name="filter_states" value="{{ settings.filter_states }}" placeholder="OH,MI">
+      </label>
+      <label>Kinds <input name="filter_kinds" value="{{ settings.filter_kinds }}"></label>
+    </div>
     <label>Categories <input name="filter_categories" value="{{ settings.filter_categories }}"></label>
-    <label>Minimum population <input type="number" name="min_pop" value="{{ settings.min_pop }}"></label>
     <div class="row">
+      <label>Minimum population <input type="number" name="min_pop" value="{{ settings.min_pop }}"></label>
       <label>Seconds between requests <input type="number" step="0.1" name="delay_seconds" value="{{ settings.delay_seconds }}"></label>
       <label>Max pages / item <input type="number" name="max_pages_per_item" value="{{ settings.max_pages_per_item }}"></label>
       <label>Max depth <input type="number" name="max_depth" value="{{ settings.max_depth }}"></label>
@@ -84,6 +88,9 @@
     <label>User-Agent <input name="user_agent" value="{{ settings.user_agent }}"></label>
   </section>
 
-  <button class="primary" type="submit">Save</button>
+  <div class="savebar">
+    <span class="hint">Changes apply to the next crawl item.</span>
+    <button class="primary" type="submit">Save settings</button>
+  </div>
 </form>
 {% endblock %}

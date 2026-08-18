@@ -6,17 +6,20 @@
     <h1>Needs review</h1>
     <p class="lede">AI and bulk ingest land here. Sign off only when the citation supports the rate.</p>
   </div>
+  <div class="row" style="flex:none">
+    <span class="tag" data-v="needs_review">{{ rows|length }} open</span>
+  </div>
 </header>
 
 {% if not rows %}
-<p class="hint">Queue is clear.</p>
+<section class="panel"><p class="hint" style="margin:0">Queue is clear.</p></section>
 {% endif %}
 
 {% for r in rows %}
 <section class="panel review-card">
   <header>
     <h2>{{ r.name }} <span class="dim">{{ r.state_usps }} · {{ r.kind }} · {{ r.geoid }}</span></h2>
-    <p class="hint">{{ r.category }}{% if r.population %} · pop {{ r.population }}{% endif %}
+    <p class="hint" style="margin:.2rem 0 0">{{ r.category }}{% if r.population %} · pop {{ r.population }}{% endif %}
       · <a href="/api/packet/{{ r.geoid }}?category={{ r.category }}">packet</a>
     </p>
   </header>
@@ -24,13 +27,13 @@
   {% set recs = findings.get(key, []) %}
   {% if recs %}
   <table>
-    <thead><tr><th>Instrument</th><th>Status</th><th>Rate</th><th>Conf</th><th>How</th><th>Source</th></tr></thead>
+    <thead><tr><th>Instrument</th><th>Status</th><th class="num">Rate</th><th>Conf</th><th>How</th><th>Source</th></tr></thead>
     <tbody>
       {% for t in recs %}
       <tr>
         <td><code>{{ t.instrument_code }}</code></td>
-        <td>{{ t.status }}</td>
-        <td>{% if t.rate_value is not none %}{{ t.rate_value }} {{ t.rate_unit }}{% else %}—{% endif %}</td>
+        <td><span class="tag" data-v="{{ t.status }}">{{ t.status }}</span></td>
+        <td class="num">{% if t.rate_value is not none %}{{ t.rate_value }} <span class="dim">{{ t.rate_unit }}</span>{% else %}—{% endif %}</td>
         <td>{{ t.confidence }}</td>
         <td class="dim">{{ t.extraction_method }}</td>
         <td><a href="{{ t.url }}" rel="noopener" target="_blank">source</a></td>
@@ -41,7 +44,7 @@
   {% else %}
   <p class="hint">No current tax_instrument rows.{% if r.last_error %} {{ r.last_error }}{% endif %}</p>
   {% endif %}
-  <div class="row">
+  <div class="row" style="margin-top:.8rem;padding-top:.7rem;border-top:1px solid var(--line)">
     <button class="primary" data-review="complete" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">Accept</button>
     <button data-review="pending" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">Return to queue</button>
     <button class="ghost" data-review="no_data" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">No data</button>

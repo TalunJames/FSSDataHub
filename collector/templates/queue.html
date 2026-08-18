@@ -6,6 +6,9 @@
     <h1>Work queue</h1>
     <p class="lede">Population-weighted. Plan a state on the dashboard, then crawl or fill by hand.</p>
   </div>
+  <div class="row" style="flex:none">
+    <a class="btn" href="/">Dashboard</a>
+  </div>
 </header>
 
 <form class="filters" method="get" action="/queue">
@@ -25,29 +28,32 @@
       {% endfor %}
     </select>
   </label>
-  <button type="submit">Filter</button>
+  <button class="primary" type="submit" style="flex:none">Filter</button>
 </form>
 
-<table>
-  <thead>
-    <tr>
-      <th>GEOID</th><th>Place</th><th>Cat</th><th>Status</th><th>Pri</th><th>Tries</th><th>Last error</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for r in rows %}
-    <tr>
-      <td><code>{{ r.geoid }}</code></td>
-      <td>{{ r.name }} <span class="dim">{{ r.state_usps }} {{ r.kind }}</span></td>
-      <td>{{ r.category }}</td>
-      <td>{{ r.status }}</td>
-      <td class="num">{{ r.priority }}</td>
-      <td class="num">{{ r.attempts }}</td>
-      <td class="dim">{{ r.last_error or '' }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="7" class="dim">No matching work items.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<section class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th>GEOID</th><th>Place</th><th>Category</th><th>Status</th>
+        <th class="num">Pri</th><th class="num">Tries</th><th>Last error</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><code>{{ r.geoid }}</code></td>
+        <td><span style="color:var(--fg)">{{ r.name }}</span> <span class="dim meta">{{ r.state_usps }} · {{ r.kind }}</span></td>
+        <td>{{ r.category }}</td>
+        <td><span class="tag" data-v="{{ r.status }}">{{ r.status }}</span></td>
+        <td class="num">{{ r.priority }}</td>
+        <td class="num">{{ r.attempts }}</td>
+        <td class="dim">{{ r.last_error or '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="dim">No matching work items.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}
