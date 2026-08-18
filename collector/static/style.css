@@ -213,6 +213,20 @@ a.primary-link { background: var(--moss); color: var(--paper); border-color: var
 @media (max-width: 980px) {
   .wizard, .doors { grid-template-columns: 1fr; }
 }
+.progressbar {
+  height: 0.7rem; background: var(--paper-2);
+  border: 1px solid var(--rule); overflow: hidden;
+}
+.progressbar-fill {
+  height: 100%; background: var(--moss-2);
+  transition: width 0.6s ease;
+}
+.activity { list-style: none; margin: 0; padding: 0; max-height: 22rem; overflow-y: auto; }
+.activity li { padding: 0.45rem 0; border-bottom: 1px solid rgba(201, 180, 138, 0.45); font-size: 0.92rem; }
+.activity li.check_flag a, .activity li.check_error a { color: var(--warn); }
+.activity li.run_failed a, .activity li.intake_failed a { color: var(--seal); }
+.activity .ts { float: right; font-size: 0.78rem; }
+.flag-reason { color: var(--warn); }
 #toast {
   position: fixed; bottom: 1.2rem; right: 1.2rem;
   background: var(--ink); color: var(--paper);

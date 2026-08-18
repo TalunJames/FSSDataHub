@@ -6,7 +6,11 @@ A web app that lives next to `taxdb` and populates it three ways:
 2. **Extract** with OpenAI-compatible APIs, Anthropic, or a local Llama/Ollama server
 3. **Manual entry** — drop a URL/PDF/photo for the AI, or answer only the questions still open (skip any)
 
-Findings still go through `needs_review`. The crawler respects `robots.txt`, stays on government hosts, rate-limits, and archives every byte before anyone extracts a number.
+Every extraction is re-read by a **second checker** — deterministic sanity checks (the quoted source text must appear in the crawled documents, rates must be plausible for their unit) plus a second, skeptical model pass. Items that pass are marked `complete` automatically; only flagged items land on the Review page, with the reason attached. If the checker cannot run, items fail toward review, never toward trust. Turn it off under **Keys & crawl → Second checker** to review everything by hand.
+
+The crawler respects `robots.txt`, stays on government hosts, rate-limits, and archives every byte before anyone extracts a number.
+
+With Anthropic, `claude-sonnet-5` is the recommended extractor (the default); setting the checker model to `claude-haiku-4-5` keeps the second pass cheap. **Save & test key** on the settings page verifies a key with one tiny call.
 
 ## Run locally
 

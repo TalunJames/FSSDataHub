@@ -6,7 +6,7 @@ import uuid
 
 from taxdb import archive, db, ingest, ledger, packets
 
-from . import crawl, extract, store
+from . import check, crawl, extract, store
 
 INTAKE_DIR = os.path.join(db.DATA_DIR, "intake")
 
@@ -179,7 +179,11 @@ def process_item(conn, settings, item):
              None if res.get("written") else "0 valid findings",
              item_id))
         if geoid and category:
-            ledger.set_status(conn, geoid, category, "needs_review")
+            if res.get("written"):
+                check.run_and_apply(conn, settings, None, geoid, category,
+                                    text or "", images=images)
+            else:
+                ledger.set_status(conn, geoid, category, "needs_review")
         conn.commit()
         return res.get("written") or 0
     except Exception as exc:

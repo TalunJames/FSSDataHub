@@ -76,6 +76,16 @@ document.addEventListener("click", async (ev) => {
         if (st.length !== 2) throw new Error("Enter a two-letter state code");
         await api("/api/statutes/fetch", { state: st });
         toast("Statute snapshot for " + st.toUpperCase() + " started");
+      } else if (act === "test-provider") {
+        const form = document.getElementById("settings-form");
+        const out = document.getElementById("provider-test-result");
+        if (form) await api("/api/settings", formToSettings(form));
+        if (out) out.textContent = "Testing…";
+        const r = await api("/api/provider/test", {});
+        if (out) out.textContent = r.ok
+          ? "✓ " + r.provider + " (" + r.model + ") answered: " + r.response
+          : "✗ " + (r.error || "test failed");
+        toast(r.ok ? "Key works" : (r.error || "test failed"), r.ok);
       }
     } catch (e) { toast(e.message, false); }
   }
@@ -230,8 +240,15 @@ async function poll() {
     set("stat-work", s.stats.work_items);
     set("stat-pending", s.stats.pending);
     set("stat-review", s.stats.needs_review);
+    set("stat-done", s.stats.done);
+    set("stat-verified", s.stats.auto_verified);
     set("stat-instruments", s.stats.instruments);
     set("stat-pages", s.stats.pages);
+    const fill = document.getElementById("progress-fill");
+    if (fill) fill.style.width = s.stats.pct_done + "%";
+    set("progress-line", s.stats.done + " of " + s.stats.work_items +
+      " items researched (" + s.stats.pct_done + "%) · " + s.stats.needs_review +
+      " flagged for review · " + s.stats.pending + " pending");
     const line = document.getElementById("worker-line");
     if (line) {
       if (s.worker.current_name) line.textContent = "Working " + s.worker.current_name;
@@ -247,3 +264,30 @@ async function poll() {
   } catch (e) { /* ignore */ }
 }
 if (document.getElementById("stat-pending")) setInterval(poll, 2500);
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+async function pollActivity() {
+  const box = document.getElementById("activity-list");
+  if (!box) return;
+  try {
+    const events = await api("/api/activity?limit=20");
+    if (!events.length) {
+      box.innerHTML = '<li class="dim">Nothing to report — no failures, nothing flagged.</li>';
+      return;
+    }
+    box.innerHTML = events.map((e) =>
+      `<li class="act ${escapeHtml(e.kind)}"><a href="${escapeHtml(e.href)}">${escapeHtml(e.title)}</a>` +
+      (e.detail ? ` <span class="dim">${escapeHtml(e.detail)}</span>` : "") +
+      ` <span class="dim ts">${escapeHtml(e.ts || "")}</span></li>`
+    ).join("");
+  } catch (e) { /* ignore */ }
+}
+if (document.getElementById("activity-list")) {
+  pollActivity();
+  setInterval(pollActivity, 10000);
+}

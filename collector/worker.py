@@ -8,7 +8,7 @@ import traceback
 from taxdb import db, ingest, ledger, packets, seed as seedmod, sources, coverage
 from taxdb.vocab import CATEGORIES
 
-from . import crawl, extract, intake, store
+from . import check, crawl, extract, intake, store
 from .settings import VALID_CATEGORIES, VALID_KINDS
 
 _cancel = threading.Event()
@@ -95,8 +95,18 @@ def request_burst(size):
 
 
 def _loop():
+    last_stale_sweep = 0.0
     while True:
         try:
+            now = time.monotonic()
+            if now - last_stale_sweep > 600:
+                # Return items stranded at in_progress by a crash or restart.
+                last_stale_sweep = now
+                conn = store.connect()
+                try:
+                    ledger.release_stale(conn, hours=2)
+                finally:
+                    conn.close()
             if _process_next_intake():
                 continue
             if _burst.is_set():
@@ -109,7 +119,9 @@ def _loop():
             finally:
                 conn.close()
             if store.as_bool(s.get("continuous_enabled")):
-                _run_batch("continuous", 1)
+                # Claim a full batch per run so the run table stays readable;
+                # the cancel flag is still checked between items.
+                _run_batch("continuous", store.as_int(s.get("burst_size"), 20))
                 if (snapshot().get("message") or "").startswith("queue empty"):
                     time.sleep(8)
                 continue
@@ -307,6 +319,11 @@ def _process(conn, client, s, run_id, row):
             ("extractor returned 0 valid findings (%d rejected); pages archived"
              % res["rejected"], db.now(), geoid, category))
         conn.commit()
+        return n_pages, 0
+
+    # Second checker: items that pass are marked complete with no human
+    # review; anything flagged stays at needs_review with the reasons.
+    check.run_and_apply(conn, s, run_id, geoid, category, text)
     return n_pages, res["written"]
 
 
