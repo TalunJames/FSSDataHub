@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Keys &amp; crawl{% endblock %}
+{% block body %}
+<header class="page">
+  <div>
+    <h1>Keys &amp; crawl</h1>
+    <p class="lede">API keys stay in the SQLite file on your dataset. Environment variables fill empty keys on first boot only.</p>
+  </div>
+</header>
+
+<form id="settings-form" class="stack">
+  <section class="panel">
+    <h2>Extractor</h2>
+    <label>Provider
+      <select name="provider">
+        {% for p in providers %}
+        <option value="{{ p }}" {% if settings.provider==p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+        <p class="hint"><code>none</code> archives pages only. <code>llama</code> talks to a local Ollama (or llama.cpp) server. <code>openai</code> also accepts any OpenAI-compatible base URL (LM Studio, Groq, vLLM). Anthropic defaults to Haiku for bulk extract; the system prompt is prompt-cached.</p>
+
+    <div class="grid2">
+      <fieldset>
+        <legend>OpenAI-compatible</legend>
+        <label>Base URL <input name="openai_base_url" value="{{ settings.openai_base_url }}"></label>
+        <label>Model <input name="openai_model" value="{{ settings.openai_model }}"></label>
+        <label>API key <input name="openai_api_key" type="password" value="{{ settings.openai_api_key }}" autocomplete="off"></label>
+      </fieldset>
+      <fieldset>
+        <legend>Anthropic</legend>
+        <label>Model <input name="anthropic_model" value="{{ settings.anthropic_model }}"></label>
+        <label>API key <input name="anthropic_api_key" type="password" value="{{ settings.anthropic_api_key }}" autocomplete="off"></label>
+      </fieldset>
+      <fieldset>
+        <legend>Local Llama / Ollama</legend>
+        <label>Base URL <input name="llama_base_url" value="{{ settings.llama_base_url }}"></label>
+        <label>Model <input name="llama_model" value="{{ settings.llama_model }}"></label>
+        <label>API key <span class="dim">optional</span>
+          <input name="llama_api_key" type="password" value="{{ settings.llama_api_key }}" autocomplete="off">
+        </label>
+        <p class="hint">On TrueNAS, use the Ollama app’s IP or <code>host.docker.internal:11434</code> if Ollama runs on the host.</p>
+      </fieldset>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>When it runs</h2>
+    <label class="check"><input type="checkbox" name="schedule_enabled" value="1" {% if settings.schedule_enabled=='1' %}checked{% endif %}> Enable schedule</label>
+    <div class="row">
+      <label>Cadence
+        <select name="schedule_kind">
+          {% for s in schedules %}
+          <option value="{{ s }}" {% if settings.schedule_kind==s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Time (UTC) <input name="schedule_time" value="{{ settings.schedule_time }}" placeholder="02:00"></label>
+      <label>Weekday (Mon=0)
+        <input type="number" name="schedule_weekday" min="0" max="6" value="{{ settings.schedule_weekday }}">
+      </label>
+    </div>
+    <label>Burst / scheduled batch size
+      <input type="number" name="burst_size" min="1" max="500" value="{{ settings.burst_size }}">
+    </label>
+    <label>Researcher label <input name="researcher" value="{{ settings.researcher }}"></label>
+  </section>
+
+  <section class="panel">
+    <h2>Scope &amp; politeness</h2>
+    <label>States filter <span class="dim">empty = any planned item</span>
+      <input name="filter_states" value="{{ settings.filter_states }}" placeholder="OH,MI">
+    </label>
+    <label>Kinds <input name="filter_kinds" value="{{ settings.filter_kinds }}"></label>
+    <label>Categories <input name="filter_categories" value="{{ settings.filter_categories }}"></label>
+    <label>Minimum population <input type="number" name="min_pop" value="{{ settings.min_pop }}"></label>
+    <div class="row">
+      <label>Seconds between requests <input type="number" step="0.1" name="delay_seconds" value="{{ settings.delay_seconds }}"></label>
+      <label>Max pages / item <input type="number" name="max_pages_per_item" value="{{ settings.max_pages_per_item }}"></label>
+      <label>Max depth <input type="number" name="max_depth" value="{{ settings.max_depth }}"></label>
+    </div>
+    <label class="check"><input type="checkbox" name="web_search" value="1" {% if settings.web_search=='1' %}checked{% endif %}> Search the web for the county/city site and tax PDFs when the catalog is not enough</label>
+    <label class="check"><input type="checkbox" name="strict_robots" value="1" {% if settings.strict_robots=='1' %}checked{% endif %}> Fail closed if robots.txt cannot be fetched</label>
+    <label>User-Agent <input name="user_agent" value="{{ settings.user_agent }}"></label>
+  </section>
+
+  <button class="primary" type="submit">Save</button>
+</form>
+{% endblock %}

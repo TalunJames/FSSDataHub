@@ -1,0 +1,33 @@
+# Always-on collector for TrueNAS SCALE.
+# Code: /mnt/Seawolf/FogSignal/taxdata
+# Data: /mnt/Seawolf/FogSignal/taxdata/sql  (tax.db, archive, intake)
+#
+# On the NAS:  sh deploy/truenas-setup.sh
+# Or paste this YAML into Apps → Discover → Custom App → Install via YAML
+# after the image exists (the setup script builds it).
+
+name: taxdb
+
+services:
+  collector:
+    image: taxdb-collector:local
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TAX_DATABASE_DATA: /data
+      TZ: America/Los_Angeles
+      COLLECTOR_USER: taxdb
+      # COLLECTOR_PASSWORD: change-me
+      LLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /mnt/Seawolf/FogSignal/taxdata/sql:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s

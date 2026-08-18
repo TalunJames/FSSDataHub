@@ -1,0 +1,247 @@
+"""Turn crawled text + a research packet into ingestible findings JSON.
+
+Providers:
+  openai  — OpenAI-compatible /v1/chat/completions (OpenAI, Groq, LM Studio, llama.cpp)
+  anthropic — Anthropic Messages API
+  llama   — Ollama /api/chat, with /v1/chat/completions as fallback
+  none    — skip extraction
+"""
+
+import base64
+import json
+import re
+
+import httpx
+
+from taxdb.vocab import validate_finding
+
+SYSTEM = """You are a tax-research extractor. You read official pages and fill
+a JSON findings file for a US local-tax database.
+
+Rules:
+- Every claim needs a source.url that appears in the provided documents.
+- Prefer primary law (statutes, ordinances) and the state agency of record.
+- If a tax is legally available but not imposed, status is "authorized_not_levied".
+- If barred by state law, status is "prohibited" with the cite.
+- If you cannot find a rate, status is "unknown" and say why in notes.
+- Do not estimate, interpolate from neighbors, or invent numbers.
+- Give the rate exactly as published, with its unit. Do not convert mills to percent.
+- Dates must be ISO YYYY-MM-DD.
+- confidence is high only when the figure is printed on a primary source.
+- Every finding must include source_quote: a short verbatim phrase copied from
+  the documents that contains the rate, the prohibition, or the authorization.
+- Return ONLY valid JSON matching the schema in the user message.
+- If the documents do not support a finding, omit it rather than guess.
+- Use only the allowed instrument_code values listed in the packet.
+"""
+
+
+class ExtractError(Exception):
+    pass
+
+
+def parse_json_payload(text):
+    """Pull a JSON object out of a model response, including fenced blocks."""
+    if text is None:
+        raise ExtractError("empty model response")
+    raw = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.S)
+    if fenced:
+        raw = fenced.group(1)
+    else:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            raw = raw[start:end + 1]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ExtractError("model did not return JSON: %s" % exc)
+
+
+def extract(settings, packet_text, documents_text, researcher="collector", images=None):
+    provider = (settings.get("provider") or "none").strip().lower()
+    if provider in ("", "none"):
+        return None, None, "no AI provider configured"
+    prompt = _user_prompt(packet_text, documents_text)
+    images = images or []
+    model = None
+    try:
+        if provider == "openai":
+            model = settings.get("openai_model") or "gpt-4o-mini"
+            raw = _openai_compat(
+                (settings.get("openai_base_url") or "https://api.openai.com/v1").rstrip("/"),
+                settings.get("openai_api_key") or "",
+                model, prompt, images=images)
+        elif provider == "anthropic":
+            model = settings.get("anthropic_model") or "claude-haiku-4-5"
+            raw = _anthropic(settings.get("anthropic_api_key") or "", model, prompt,
+                             images=images)
+        elif provider == "llama":
+            model = settings.get("llama_model") or "llama3.1"
+            raw = _llama(
+                (settings.get("llama_base_url") or "http://127.0.0.1:11434").rstrip("/"),
+                settings.get("llama_api_key") or "",
+                model, prompt, images=images)
+        else:
+            return None, None, "unknown provider %r" % provider
+    except ExtractError as exc:
+        return None, None, str(exc)
+    except httpx.HTTPError as exc:
+        return None, None, "provider HTTP error: %s" % exc
+
+    try:
+        doc = parse_json_payload(raw)
+    except ExtractError as exc:
+        return raw, None, str(exc)
+
+    doc.setdefault("schema_version", "1.0")
+    doc.setdefault("researcher", researcher)
+    doc.setdefault("extraction_method", "agent_research")
+    findings = doc.get("findings")
+    if not isinstance(findings, list):
+        return raw, None, "JSON has no findings array"
+    return raw, doc, None
+
+
+def validate_doc(conn, doc):
+    """Return (ok_rows, errors) without writing."""
+    errors, ok_rows = [], []
+    for i, f in enumerate(doc.get("findings") or []):
+        errs = validate_finding(f, i)
+        geoid = f.get("geoid")
+        if geoid and not conn.execute(
+                "SELECT 1 FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone():
+            errs.append("finding[%d]: geoid %r is not a seeded jurisdiction" % (i, geoid))
+        if errs:
+            errors.extend(errs)
+        else:
+            ok_rows.append(f)
+    return ok_rows, errors
+
+
+def _user_prompt(packet_text, documents_text):
+    return (
+        packet_text
+        + "\n\n## Documents fetched for this jurisdiction\n\n"
+        + (documents_text or "_No documents fetched._")
+        + "\n\nRespond with JSON only."
+    )
+
+
+def _b64(blob):
+    return base64.b64encode(blob).decode("ascii")
+
+
+def _openai_compat(base_url, api_key, model, prompt, images=None):
+    url = base_url
+    if not url.endswith("/chat/completions"):
+        url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    user_content = prompt
+    if images:
+        parts = [{"type": "text", "text": prompt}]
+        for img in images:
+            mime = img.get("mime") or "image/png"
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": "data:%s;base64,%s" % (mime, _b64(img["data"]))},
+            })
+        user_content = parts
+    body = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
+    }
+    with httpx.Client(timeout=180.0) as client:
+        r = client.post(url, headers=headers, json=body)
+        if r.status_code >= 400:
+            raise ExtractError("OpenAI-compatible API %s: %s" % (r.status_code, r.text[:400]))
+        data = r.json()
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise ExtractError("unexpected OpenAI-compatible response")
+
+
+def _anthropic(api_key, model, prompt, images=None):
+    if not api_key:
+        raise ExtractError("Anthropic API key is empty")
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
+    }
+    content = []
+    for img in images or []:
+        mime = img.get("mime") or "image/png"
+        if mime not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            mime = "image/jpeg"
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime, "data": _b64(img["data"])},
+        })
+    content.append({"type": "text", "text": prompt})
+    body = {
+        "model": model,
+        "max_tokens": 8192,
+        "system": [
+            {"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}},
+        ],
+        "messages": [{"role": "user", "content": content}],
+    }
+    with httpx.Client(timeout=180.0) as client:
+        r = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=body)
+        if r.status_code >= 400:
+            raise ExtractError("Anthropic API %s: %s" % (r.status_code, r.text[:400]))
+        data = r.json()
+    parts = []
+    for block in data.get("content") or []:
+        if block.get("type") == "text":
+            parts.append(block.get("text") or "")
+    if not parts:
+        raise ExtractError("Anthropic response had no text")
+    return "\n".join(parts)
+
+
+def _llama(base_url, api_key, model, prompt, images=None):
+    """Prefer Ollama native /api/chat; fall back to OpenAI-compatible."""
+    native = base_url
+    if native.endswith("/v1"):
+        native = native[:-3]
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    msg = {
+        "role": "user",
+        "content": prompt,
+    }
+    if images:
+        msg["images"] = [_b64(img["data"]) for img in images]
+    body = {
+        "model": model,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            msg,
+        ],
+        "options": {"temperature": 0.1},
+    }
+    with httpx.Client(timeout=300.0) as client:
+        try:
+            r = client.post(native.rstrip("/") + "/api/chat", headers=headers, json=body)
+            if r.status_code < 400:
+                data = r.json()
+                got = (data.get("message") or {}).get("content")
+                if got:
+                    return got
+        except httpx.HTTPError:
+            pass
+        return _openai_compat(native.rstrip("/") + "/v1", api_key, model, prompt,
+                              images=images)

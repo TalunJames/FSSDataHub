@@ -1,0 +1,13 @@
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.DS_Store
+cache/
+out/
+archive/*
+!archive/.gitkeep
+sql/
+.pytest_cache/
+.env

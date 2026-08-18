@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Manual entry{% endblock %}
+{% block body %}
+<header class="page">
+  <div>
+    <h1>Manual entry</h1>
+    <p class="lede">When the crawler gets lost, drop the real document — or answer only the questions still open. Skip anything you do not know.</p>
+  </div>
+</header>
+
+<section id="step-pick" class="wizard">
+  <div class="panel stack">
+    <h2>Who are you filling in?</h2>
+    <label>Jurisdiction
+      <input id="m-search" placeholder="city, county, GEOID, or state" autocomplete="off">
+    </label>
+    <ul id="m-results" class="suggest" hidden></ul>
+    <p id="m-picked" class="hint">Search and select a place.</p>
+    <input type="hidden" id="m-geoid">
+    <p class="chip-label">Category</p>
+    <div id="m-cats" class="chips"></div>
+    <button class="primary" id="m-continue" type="button" disabled>Continue</button>
+  </div>
+  <div class="panel">
+    <h2>Waiting on a person</h2>
+    <p class="hint">Crawler misses, failed extracts, and review leftovers.</p>
+    <ul id="m-inbox" class="inbox"></ul>
+  </div>
+</section>
+
+<section id="step-choose" class="wizard" hidden>
+  <p class="crumb"><button type="button" class="ghost" data-back="pick">← Different place</button></p>
+  <div class="panel">
+    <h2 id="choose-title">Place</h2>
+    <p class="hint" id="choose-why"></p>
+    <div id="choose-known"></div>
+  </div>
+  <div class="doors">
+    <button type="button" class="door" data-door="source">
+      <span class="door-kicker">1 · Source</span>
+      <strong>I have a URL, PDF, or photo</strong>
+      <span>Queue it for the AI. Use this when the crawler missed the rate table, ordinance, or a screenshot you already have.</span>
+    </button>
+    <button type="button" class="door" data-door="ask">
+      <span class="door-kicker">2 · Interview</span>
+      <strong>Ask me what’s still missing</strong>
+      <span>Only the gaps — what the crawler or extractor could not fill. Skip any question, or skip the rest.</span>
+    </button>
+  </div>
+  <p class="hint"><button type="button" class="ghost" id="leave-later">Leave for later</button></p>
+</section>
+
+<section id="step-source" class="wizard" hidden>
+  <p class="crumb"><button type="button" class="ghost" data-back="choose">← Back</button></p>
+  <form id="source-form" class="panel stack">
+    <h2>Hand the AI a source</h2>
+    <p class="hint">One URL, or drop PDFs and images. They go on the intake queue; the collector reads them with your configured provider (OpenAI, Anthropic, or Llama).</p>
+    <label>URL
+      <input name="url" placeholder="https://tax.ohio.gov/…">
+    </label>
+    <div id="drop" class="dropzone">
+      <input type="file" id="source-files" accept=".pdf,image/*,.png,.jpg,.jpeg,.webp" multiple>
+      <p>Drop a PDF or image here, or click to choose.</p>
+      <p class="dim" id="drop-list"></p>
+    </div>
+    <label>Note for the extractor <span class="dim">optional — “rate table on page 4”</span>
+      <input name="note" placeholder="what to look at">
+    </label>
+    <button class="primary" type="submit">Queue for AI</button>
+  </form>
+  <div class="panel">
+    <h2>Intake for this place</h2>
+    <ul id="intake-list" class="inbox"></ul>
+  </div>
+</section>
+
+<section id="step-ask" class="wizard" hidden>
+  <p class="crumb"><button type="button" class="ghost" data-back="choose">← Back</button>
+    <button type="button" class="ghost" data-door="source">I have a document instead</button>
+  </p>
+  <div id="ask-done" class="panel" hidden>
+    <h2>Nothing left to ask</h2>
+    <p class="hint">Every primary instrument for this category is filled or was skipped recently. You can still drop a source, or send this to review.</p>
+    <div class="row">
+      <button type="button" class="primary" data-door="source">Drop a source</button>
+      <a class="btn" href="/review">Go to review</a>
+    </div>
+  </div>
+  <div id="ask-card" class="panel q-card stack" hidden>
+    <p class="progress" id="q-progress"></p>
+    <h2 id="q-title"></h2>
+    <p id="q-prompt"></p>
+    <p class="why" id="q-why"></p>
+    <p class="hint" id="q-known"></p>
+    <p class="chip-label">Status</p>
+    <div id="q-status" class="chips"></div>
+    <div id="q-rate" class="row" hidden>
+      <label>Rate <input id="q-rate-value" type="number" step="any"></label>
+      <label>Unit
+        <select id="q-rate-unit"></select>
+      </label>
+      <label>Fiscal year <input id="q-year" type="number" placeholder="2026"></label>
+    </div>
+    <label>Statute cite <span class="dim">optional</span>
+      <input id="q-cite" placeholder="Rev. Stat. § …">
+    </label>
+    <label>Source URL
+      <input id="q-source" placeholder="https://…">
+    </label>
+    <div id="q-cites" class="cite-chips"></div>
+    <label>Notes <span class="dim">optional</span>
+      <textarea id="q-notes" rows="2"></textarea>
+    </label>
+    <div class="row q-actions">
+      <button type="button" class="primary" id="q-save">Save and next</button>
+      <button type="button" id="q-skip">Skip</button>
+      <button type="button" id="q-unknown">Don’t know</button>
+      <button type="button" class="ghost" id="q-skip-rest">Skip remaining</button>
+    </div>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  window.CATEGORIES = {{ categories_json | safe }};
+  window.START_GEOID = {{ start_geoid_json | safe }};
+  window.START_CATEGORY = {{ start_category_json | safe }};
+</script>
+<script src="/static/manual.js"></script>
+{% endblock %}

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Collector{% endblock %} · Tax Database</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <p class="mark">Tax Database</p>
+      <p class="mark-sub">Collector · TrueNAS</p>
+      <nav>
+        <a href="/" class="{{ 'on' if nav=='dash' else '' }}">Dashboard</a>
+        <a href="/queue" class="{{ 'on' if nav=='queue' else '' }}">Work queue</a>
+        <a href="/review" class="{{ 'on' if nav=='review' else '' }}">Review <span class="count">{{ stats.needs_review }}</span></a>
+        <a href="/manual" class="{{ 'on' if nav=='manual' else '' }}">Manual entry</a>
+        <a href="/runs" class="{{ 'on' if nav=='runs' else '' }}">Crawl runs</a>
+        <a href="/settings" class="{{ 'on' if nav=='settings' else '' }}">Keys &amp; crawl</a>
+      </nav>
+      <div class="rail-foot">
+        <p class="pulse {{ 'live' if worker.state=='running' else '' }}">
+          <span class="dot"></span>
+          {{ worker.state }}{% if worker.mode %} · {{ worker.mode }}{% endif %}
+        </p>
+        <p class="path">{{ stats.db_path }}</p>
+      </div>
+    </aside>
+    <main>
+      {% block body %}{% endblock %}
+    </main>
+  </div>
+  <div id="toast" hidden></div>
+  <script src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,39 @@
+# Tax Database Collector — TrueNAS SCALE Custom App
+#
+# Copy this repo onto a dataset, create a data dataset, then install as a
+# custom app with this compose file. Map the two host paths below to your pool.
+
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taxdb-collector
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TAX_DATABASE_DATA: /data
+      TZ: America/Los_Angeles
+      # Optional gate for the web UI (username defaults to taxdb)
+      # COLLECTOR_USER: taxdb
+      # COLLECTOR_PASSWORD: change-me
+      # Optional first-boot keys; after that, the Settings page wins.
+      # OPENAI_API_KEY: ""
+      # ANTHROPIC_API_KEY: ""
+      # LLAMA_BASE_URL: http://host.docker.internal:11434
+      # COLLECTOR_PROVIDER: llama
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # TrueNAS: /mnt/<pool>/<dataset>
+      - taxdb-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  taxdb-data:

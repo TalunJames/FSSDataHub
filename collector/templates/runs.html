@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Crawl runs{% endblock %}
+{% block body %}
+<header class="page">
+  <div>
+    <h1>Crawl runs</h1>
+    <p class="lede">Every fetch is archived. Open a run to see pages and extractor output.</p>
+  </div>
+</header>
+
+<section class="split">
+  <div class="panel">
+    <h2>Runs</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th>P/F</th><th>When</th></tr></thead>
+      <tbody>
+        {% for r in runs %}
+        <tr class="{{ 'on' if r.id==active else '' }}">
+          <td><a href="/runs?run_id={{ r.id }}">{{ r.id }}</a></td>
+          <td>{{ r.mode }}</td>
+          <td>{{ r.status }}</td>
+          <td class="num">{{ r.pages_fetched }}/{{ r.findings_written }}</td>
+          <td class="dim">{{ r.started_at }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="dim">None yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="stack">
+    <div class="panel">
+      <h2>Pages{% if active %} · run {{ active }}{% endif %}</h2>
+      <table>
+        <thead><tr><th>HTTP</th><th>Title / URL</th><th>Chars</th></tr></thead>
+        <tbody>
+          {% for p in pages %}
+          <tr>
+            <td>{{ p.http_status or p.error or '—' }}</td>
+            <td>
+              <div>{{ p.title or '' }}</div>
+              <a class="dim" href="{{ p.final_url or p.url }}" target="_blank" rel="noopener">{{ p.url }}</a>
+              {% if p.robots_allowed == 0 %}<span class="pill">robots</span>{% endif %}
+            </td>
+            <td class="num">{{ p.text_chars }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="dim">No pages on this run.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>Extractor</h2>
+      {% for e in extracts %}
+      <article class="extract">
+        <p><code>{{ e.geoid }}</code> {{ e.category }} · {{ e.provider }}/{{ e.model }}
+          · {{ 'parsed' if e.parsed_ok else 'failed' }}
+        </p>
+        {% if e.error %}<p class="warn-text">{{ e.error }}</p>{% endif %}
+        <pre class="preview">{{ e.preview }}</pre>
+      </article>
+      {% else %}
+      <p class="hint">No extractor output.</p>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endblock %}
