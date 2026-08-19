@@ -6,6 +6,8 @@ from taxdb import db, ingest, ledger
 from taxdb.sources import STATE_AGENCIES
 from taxdb.vocab import CATEGORIES, INSTRUMENTS, RATE_UNITS, STATUSES
 
+from . import store
+
 LABELS = {
     "general_operating_levy": "General operating levy / millage",
     "debt_service_levy": "Debt service levy",
@@ -327,11 +329,9 @@ def apply_answer(conn, geoid, category, question, action, payload, researcher="m
             "url": source_url,
             "name": payload.get("source_name") or "Manual interview",
             "source_type": payload.get("source_type") or "portal",
-            "authority_tier": int(payload.get("authority_tier") or 4),
+            "authority_tier": store.as_int(payload.get("authority_tier"), 4),
         },
     }
-    if status != "levied":
-        finding["rate_value"] = finding["rate_value"]  # keep if they filled it
     doc = {
         "schema_version": "1.0",
         "researcher": researcher,

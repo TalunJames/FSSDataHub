@@ -30,8 +30,13 @@ def priority_for(kind, population):
 
 
 def plan(conn, states=None, kinds=("county", "place"), categories=None,
-         min_pop=0, batch=None, limit=None):
-    """Create work items for the selected jurisdictions x categories."""
+         min_pop=0, batch=None, limit=None, geoids=None):
+    """Create work items for the selected jurisdictions x categories.
+
+    geoids narrows the plan to specific places. Without it, the autopilot's
+    expand step had no way to plan its chunk except by re-planning whole
+    states, once per geoid.
+    """
     categories = list(categories or WORK_CATEGORIES.keys())
     for c in categories:
         if c not in WORK_CATEGORIES:
@@ -43,6 +48,9 @@ def plan(conn, states=None, kinds=("county", "place"), categories=None,
     sql = ("SELECT geoid, kind, population FROM jurisdiction "
            "WHERE kind IN (%s)" % ",".join("?" * len(kinds)))
     params = list(kinds)
+    if geoids:
+        sql += " AND geoid IN (%s)" % ",".join("?" * len(geoids))
+        params += list(geoids)
     if states:
         sql += " AND state_usps IN (%s)" % ",".join("?" * len(states))
         params += [s.upper() for s in states]
@@ -248,11 +256,16 @@ def unplanned(conn, categories, states=None, kinds=("county", "place"), limit=25
     This is what lets the collector keep going without anyone drawing a slice
     by hand: it always knows the next most valuable thing nobody has planned.
     """
+    # "Missing at least one of the categories", not "missing all of them":
+    # a place someone planned for property alone must still be expanded to
+    # the other passes, or it never gets them. plan() is INSERT OR IGNORE,
+    # so re-planning the categories it already has is free.
     sql = ("SELECT j.geoid, j.kind, j.population FROM jurisdiction j "
-           "WHERE j.kind IN (%s) AND NOT EXISTS ("
-           "  SELECT 1 FROM work_item w WHERE w.geoid = j.geoid "
-           "  AND w.category IN (%s))" % (",".join("?" * len(kinds)),
-                                          ",".join("?" * len(categories))))
+           "WHERE j.kind IN (%s) AND ("
+           "  SELECT COUNT(DISTINCT w.category) FROM work_item w "
+           "  WHERE w.geoid = j.geoid AND w.category IN (%s)) < %d"
+           % (",".join("?" * len(kinds)), ",".join("?" * len(categories)),
+              len(categories)))
     params = list(kinds) + list(categories)
     if states:
         sql += " AND j.state_usps IN (%s)" % ",".join("?" * len(states))

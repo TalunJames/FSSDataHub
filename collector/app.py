@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from taxdb import db, export, ingest, ledger
@@ -41,8 +42,10 @@ def _auth(credentials: HTTPBasicCredentials = Depends(security)):
     if credentials is None:
         raise HTTPException(401, "auth required",
                             headers={"WWW-Authenticate": "Basic"})
-    u_ok = secrets.compare_digest(credentials.username, user)
-    p_ok = secrets.compare_digest(credentials.password, password)
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII text,
+    # which would turn a bad login into a 500 instead of a 401.
+    u_ok = secrets.compare_digest(credentials.username.encode(), user.encode())
+    p_ok = secrets.compare_digest(credentials.password.encode(), password.encode())
     if not (u_ok and p_ok):
         raise HTTPException(401, "auth required",
                             headers={"WWW-Authenticate": "Basic"})
@@ -72,15 +75,24 @@ def _startup():
     worker.start()
 
 
-def _ctx(request, **extra):
-    conn = store.connect()
+def _ctx(request, conn=None, precomputed=None, **extra):
+    """Template context. Pass conn/precomputed to reuse a route's own work
+    instead of re-running every dashboard query on the same page load."""
+    own = conn is None
+    if own:
+        conn = store.connect()
     try:
-        settings = store.get_all(conn)
-        stats = _stats(conn)
-        progress = autopilot.progress(conn, settings) if stats["ready"] else None
+        pre = precomputed or {}
+        settings = pre.get("settings") or store.get_all(conn)
+        stats = pre.get("stats") or _stats(conn)
+        if "progress" in pre:
+            progress = pre["progress"]
+        else:
+            progress = autopilot.progress(conn, settings) if stats["ready"] else None
         week = present.week(conn)
     finally:
-        conn.close()
+        if own:
+            conn.close()
     user = os.environ.get("COLLECTOR_USER", "")
     ctx = {
         "request": request,
@@ -132,15 +144,18 @@ def _tally(progress):
 
 
 def _stats(conn):
-    def n(sql, params=()):
-        return conn.execute(sql, params).fetchone()[0]
+    # Every count tolerates a missing table. _stats runs inside _ctx on every
+    # page, so one absent table (an older DB, a wrong TAX_DATABASE_DB) must
+    # degrade to a zero, not 500 the whole UI for a non-technical owner.
+    def n(sql, params=(), default=0):
+        try:
+            return conn.execute(sql, params).fetchone()[0]
+        except Exception:
+            return default
 
-    db_exists = True
-    try:
-        n_j = n("SELECT COUNT(*) FROM jurisdiction")
-    except Exception:
-        n_j = 0
-        db_exists = False
+    n_j = n("SELECT COUNT(*) FROM jurisdiction", default=None)
+    db_exists = n_j is not None
+    n_j = n_j or 0
     tot = n("SELECT COUNT(*) FROM work_item") if db_exists else 0
     pending = n("SELECT COUNT(*) FROM work_item WHERE status='pending'") if tot else 0
     in_progress = n("SELECT COUNT(*) FROM work_item WHERE status='in_progress'") if tot else 0
@@ -149,25 +164,19 @@ def _stats(conn):
     running = n("SELECT COUNT(*) FROM crawl_run WHERE status='running'")
     instruments = n("SELECT COUNT(*) FROM tax_instrument WHERE superseded_by IS NULL") if db_exists else 0
     pages = n("SELECT COUNT(*) FROM crawl_page")
-    try:
-        intake_queued = n("SELECT COUNT(*) FROM intake_item WHERE status='queued'")
-    except Exception:
-        intake_queued = 0
-    try:
-        auto_verified = n(
-            "SELECT COUNT(*) FROM (SELECT geoid, category FROM check_result "
-            "WHERE verdict='pass' GROUP BY geoid, category)")
-    except Exception:
-        auto_verified = 0
+    intake_queued = n("SELECT COUNT(*) FROM intake_item WHERE status='queued'")
+    # Latest verdict per item only. check_result is append-only, so counting
+    # every historical pass reports items as auto-verified after they were
+    # requeued and flagged — a number the operator would rightly distrust.
+    auto_verified = n(
+        "SELECT COUNT(*) FROM check_result c WHERE c.verdict='pass' AND c.id IN "
+        "(SELECT MAX(id) FROM check_result GROUP BY geoid, category)")
     blocked = n("SELECT COUNT(*) FROM work_item WHERE status='blocked'") if tot else 0
     awaiting = n("SELECT COUNT(*) FROM work_item WHERE status='awaiting_ai'") if tot else 0
-    try:
-        batch_queued = n("SELECT COUNT(*) FROM extract_batch_item "
-                         "WHERE status='queued'")
-        batch_flight = n("SELECT COUNT(*) FROM extract_batch "
-                         "WHERE status IN ('submitted','ended')")
-    except Exception:
-        batch_queued = batch_flight = 0
+    batch_queued = n("SELECT COUNT(*) FROM extract_batch_item "
+                     "WHERE status='queued'")
+    batch_flight = n("SELECT COUNT(*) FROM extract_batch "
+                     "WHERE status IN ('submitted','ended')")
     return {
         "jurisdictions": n_j,
         "work_items": tot,
@@ -282,12 +291,16 @@ def dashboard(request: Request, _: bool = Depends(_auth)):
         inbox = present.inbox(conn, stats, settings, progress)
         timeline = present.timeline(conn)
         published = present.published_since_last_night(conn)
+        ctx = _ctx(request, conn=conn,
+                   precomputed={"settings": settings, "stats": stats,
+                                "progress": progress},
+                   next_up=next_up, inbox=inbox, timeline=timeline,
+                   published_recent=published,
+                   greeting=present.greeting(settings.get("researcher")),
+                   dateline=present.dateline(), nav="today")
     finally:
         conn.close()
-    return templates.TemplateResponse(request, "dashboard.html", _ctx(
-        request, next_up=next_up, inbox=inbox, timeline=timeline,
-        published_recent=published, greeting=present.greeting(settings.get("researcher")),
-        dateline=present.dateline(), nav="today"))
+    return templates.TemplateResponse(request, "dashboard.html", ctx)
 
 
 @app.get("/data", response_class=HTMLResponse)
@@ -346,10 +359,13 @@ def settings_page(request: Request, _: bool = Depends(_auth)):
 @app.get("/manual", response_class=HTMLResponse)
 def manual_page(request: Request, geoid: str = "", category: str = "",
                 _: bool = Depends(_auth)):
+    # Raw strings, escaped in the template with |tojson. json.dumps here does
+    # not escape < or >, so ?geoid=</script>... could break out of the script
+    # block and run in the operator's browser.
     return templates.TemplateResponse(request, "manual.html", _ctx(
         request, nav="manual",
-        start_geoid_json=json.dumps(geoid or ""),
-        start_category_json=json.dumps(category or "")))
+        start_geoid=geoid or "",
+        start_category=category or ""))
 
 
 @app.get("/review", response_class=HTMLResponse)
@@ -535,9 +551,13 @@ def api_activity(limit: int = 30, _: bool = Depends(_auth)):
                 flags = json.loads(r["flags"]) if r["flags"] else []
             except ValueError:
                 flags = []
+            # Same shape guard as present.flag_reasons: one malformed flags
+            # column must not 500 the whole activity feed.
+            if not isinstance(flags, list):
+                flags = []
             detail = "; ".join(
                 "%s: %s" % (f.get("instrument_code") or "?", f.get("reason") or "")
-                for f in flags[:3]) or "checker could not run"
+                for f in flags[:3] if isinstance(f, dict)) or "checker could not run"
             events.append({
                 "kind": "check_" + r["verdict"], "ts": r["ts"],
                 "title": "%s (%s) / %s %s" % (
@@ -641,7 +661,7 @@ async def api_toggle(request: Request, _: bool = Depends(_auth)):
 @app.post("/api/crawl/burst")
 async def api_burst(request: Request, _: bool = Depends(_auth)):
     body = await request.json()
-    size = int(body.get("size") or 20)
+    size = store.as_int(body.get("size"), 20)
     worker.request_burst(size)
     return {"ok": True, "size": size}
 
@@ -686,11 +706,17 @@ async def api_plan(request: Request, _: bool = Depends(_auth)):
     states = [x.strip().upper() for x in (body.get("states") or "").replace(",", " ").split() if x.strip()]
     kinds = [x.strip() for x in (body.get("kinds") or "county,place,state").split(",") if x.strip()]
     cats = [x.strip() for x in (body.get("categories") or ",".join(WORK_CATEGORIES)).split(",") if x.strip()]
-    min_pop = int(body.get("min_pop") or 0)
-    limit = body.get("limit")
-    limit = int(limit) if limit else None
-    n = worker.run_plan(states or None, kinds=kinds, categories=cats,
-                        min_pop=min_pop, limit=limit)
+    min_pop = store.as_int(body.get("min_pop"), 0)
+    limit = store.as_int(body.get("limit"), 0) or None
+    try:
+        # In a thread: a national plan is >100k INSERTs, and running it on the
+        # event loop freezes every other request, including the status poll.
+        n = await run_in_threadpool(
+            worker.run_plan, states or None, kinds=kinds, categories=cats,
+            min_pop=min_pop, limit=limit)
+    except SystemExit as exc:
+        # ledger.plan rejects unknown categories with SystemExit.
+        raise HTTPException(400, str(exc))
     return {"ok": True, "created": n}
 
 
@@ -821,6 +847,12 @@ async def api_fetch_url(request: Request, _: bool = Depends(_auth)):
     url = (body.get("url") or "").strip()
     if not url.startswith("http"):
         raise HTTPException(400, "url must be http(s)")
+    # A fetch plus a model extraction takes minutes. On the event loop that
+    # freezes the whole app, status poll included; run it in a thread.
+    return await run_in_threadpool(_fetch_url_sync, body, url)
+
+
+def _fetch_url_sync(body, url):
     conn = store.connect()
     try:
         s = store.get_all(conn)
@@ -843,7 +875,12 @@ async def api_fetch_url(request: Request, _: bool = Depends(_auth)):
             packet = ""
             if geoid:
                 from taxdb import packets
-                packet = packets.build(conn, geoid, cats)
+                try:
+                    packet = packets.build(conn, geoid, cats, lean=True)
+                except SystemExit:
+                    # Unknown geoid or category from the form: extract with a
+                    # generic brief rather than 500ing the request.
+                    packet = ""
             raw, doc, extract_err = extract.extract(s, packet or "Extract tax facts from this page.", preview)
             conn.execute(
                 "INSERT INTO crawl_extract (run_id, geoid, category, provider, model, "

@@ -210,6 +210,10 @@ def cmd_coverage(args):
 def cmd_review(args):
     conn = db.connect(create=False)
     if args.geoid:
+        if not args.category:
+            # set_status matches WHERE category=?, so a missing category
+            # updates nothing while printing success.
+            raise SystemExit("--category is required with --geoid")
         ledger.set_status(conn, args.geoid, args.category, args.status)
         conn.commit()
         print("%s / %s -> %s" % (args.geoid, args.category, args.status))

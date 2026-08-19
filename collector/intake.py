@@ -87,10 +87,12 @@ def _ensure_work(conn, geoid, category):
     conn.execute(
         "INSERT OR IGNORE INTO work_item (geoid, category, priority, updated_at) "
         "VALUES (?,?,?,?)", (geoid, category, pri, db.now()))
+    # claimed_at is what release_stale filters on. Left NULL, a work item
+    # stranded here by a failed intake would never be swept back to pending.
     conn.execute(
-        "UPDATE work_item SET status='in_progress', last_error=?, updated_at=? "
-        "WHERE geoid=? AND category=? AND status='pending'",
-        ("intake queued", db.now(), geoid, category))
+        "UPDATE work_item SET status='in_progress', last_error=?, claimed_at=?, "
+        "updated_at=? WHERE geoid=? AND category=? AND status='pending'",
+        ("intake queued", db.now(), db.now(), geoid, category))
     conn.commit()
 
 
@@ -116,7 +118,7 @@ def next_queued(conn):
 
 def process_item(conn, settings, item):
     """Fetch/read the source, extract, ingest. Returns findings written."""
-    item_id = item["id"] if not isinstance(item, dict) else item["id"]
+    item_id = item["id"]
     if not isinstance(item, dict):
         item = dict(item)
     conn.execute(
@@ -126,7 +128,7 @@ def process_item(conn, settings, item):
     try:
         text, images, err = _materialize(conn, settings, item)
         if err and not text and not images:
-            _fail(conn, item_id, err)
+            _fail(conn, item_id, err, geoid=geoid, category=category)
             return 0
         if (settings.get("provider") or "none") == "none":
             conn.execute(
@@ -138,7 +140,9 @@ def process_item(conn, settings, item):
         packet = ""
         if geoid:
             try:
-                packet = packets.build(conn, geoid, [category] if category else None)
+                packet = packets.build(conn, geoid,
+                                       [category] if category else None,
+                                       lean=True)
             except SystemExit:
                 packet = "Extract tax facts from this operator-supplied source."
         else:
@@ -158,15 +162,17 @@ def process_item(conn, settings, item):
              _model(settings), (raw or "")[:200000],
              0 if xerr or not doc else 1, xerr, db.now()))
         if xerr or not doc:
-            _fail(conn, item_id, xerr or "extract failed")
+            _fail(conn, item_id, xerr or "extract failed",
+                  geoid=geoid, category=category)
             return 0
         j = conn.execute("SELECT state_usps FROM jurisdiction WHERE geoid=?",
                          (geoid,)).fetchone() if geoid else None
         ingest.stamp_doc(doc, geoid=geoid, category=category,
                          state_usps=j["state_usps"] if j else None,
                          researcher=researcher, source_url=item.get("url"))
-        res = ingest.load_doc(conn, doc, allow_partial=True,
-                              label="intake:%s" % item_id)
+        res = ingest.load_doc(
+            conn, doc, allow_partial=True, label="intake:%s" % item_id,
+            work_item=(geoid, category) if geoid and category else None)
         conn.execute(
             "UPDATE intake_item SET status='ok', finished_at=?, findings_written=?, "
             "error=? WHERE id=?",
@@ -182,14 +188,22 @@ def process_item(conn, settings, item):
         conn.commit()
         return res.get("written") or 0
     except Exception as exc:
-        _fail(conn, item_id, str(exc)[:500])
+        _fail(conn, item_id, str(exc)[:500], geoid=geoid, category=category)
         return 0
 
 
-def _fail(conn, item_id, message):
+def _fail(conn, item_id, message, geoid=None, category=None):
     conn.execute(
         "UPDATE intake_item SET status='failed', finished_at=?, error=? WHERE id=?",
         (db.now(), message, item_id))
+    # The work item was parked at in_progress when the document was enqueued.
+    # Hand it back to the queue so the crawler can still research the place;
+    # leaving it in_progress hides it from claim() until the stale sweep.
+    if geoid and category:
+        conn.execute(
+            "UPDATE work_item SET status='pending', last_error=?, updated_at=? "
+            "WHERE geoid=? AND category=? AND status='in_progress'",
+            (("intake failed: %s" % message)[:500], db.now(), geoid, category))
     conn.commit()
 
 

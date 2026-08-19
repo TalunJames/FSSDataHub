@@ -635,7 +635,10 @@ WHERE (t.effective_from IS NULL OR t.effective_from <= date('now'))
     LIMIT 1
   );
 
-CREATE VIEW IF NOT EXISTS v_headroom AS
+-- Dropped first so a changed definition actually reaches existing databases:
+-- CREATE VIEW IF NOT EXISTS never updates a view that already exists.
+DROP VIEW IF EXISTS v_headroom;
+CREATE VIEW v_headroom AS
 SELECT j.geoid, j.name, j.state_usps, j.kind, j.population,
        g.id AS grant_id, g.category, g.instrument_code,
        g.max_rate, g.max_rate_unit,
@@ -652,11 +655,15 @@ JOIN v_live_grant g
                             AND g2.instrument_code = g.instrument_code
                             AND g2.jurisdiction_kind = j.kind)))
 LEFT JOIN (
-    SELECT geoid, instrument_code, SUM(rate_value) AS levied_rate
+    -- Grouped by unit and matched to the cap's unit: mills summed against a
+    -- percent cap is not headroom, it is a category error.
+    SELECT geoid, instrument_code, rate_unit, SUM(rate_value) AS levied_rate
     FROM tax_instrument
     WHERE superseded_by IS NULL AND status = 'levied'
-    GROUP BY geoid, instrument_code
-) lev ON lev.geoid = j.geoid AND lev.instrument_code = g.instrument_code;
+      AND rate_value IS NOT NULL
+    GROUP BY geoid, instrument_code, rate_unit
+) lev ON lev.geoid = j.geoid AND lev.instrument_code = g.instrument_code
+     AND lev.rate_unit = g.max_rate_unit;
 
 CREATE VIEW IF NOT EXISTS v_near_miss AS
 SELECT j.state_usps, j.name, j.population, b.election_date, b.measure_id_local,

@@ -123,8 +123,8 @@
 {% block scripts %}
 <script>
   window.CATEGORIES = {{ categories_json | safe }};
-  window.START_GEOID = {{ start_geoid_json | safe }};
-  window.START_CATEGORY = {{ start_category_json | safe }};
+  window.START_GEOID = {{ start_geoid | tojson }};
+  window.START_CATEGORY = {{ start_category | tojson }};
 </script>
 <script src="/static/manual.js" defer></script>
 {% endblock %}

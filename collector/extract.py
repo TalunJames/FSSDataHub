@@ -98,7 +98,15 @@ def anthropic_caps(model):
                               {"adaptive": False, "effort": False})
 
 
-def anthropic_tuning(model, effort=None, max_tokens=8192):
+# One cap for every Anthropic call, thinking and answer together. 8192 was
+# too tight: adaptive thinking spends from the same budget, and a
+# findings-heavy county could truncate mid-JSON, fail the parse, and send the
+# item back for a full recrawl and re-extraction — the whole cost, paid twice.
+# 16384 is still safe without streaming.
+ANTHROPIC_MAX_TOKENS = 16384
+
+
+def anthropic_tuning(model, effort=None, max_tokens=ANTHROPIC_MAX_TOKENS):
     """Thinking and effort parameters for one Anthropic call.
 
     Thinking is on by default on the 5-generation models when the parameter is
@@ -298,7 +306,7 @@ def _anthropic(api_key, model, prompt, images=None, system=SYSTEM, effort=None):
     content.append({"type": "text", "text": prompt})
     body = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
         # The breakpoint is correct placement even though it does not fire
         # today: this prompt is a few hundred tokens and the minimum cacheable
         # prefix is larger. It costs nothing and starts paying if the prompt
@@ -316,6 +324,12 @@ def _anthropic(api_key, model, prompt, images=None, system=SYSTEM, effort=None):
         if r.status_code >= 400:
             raise ExtractError("Anthropic API %s: %s" % (r.status_code, r.text[:400]))
         data = r.json()
+    # A truncated answer is not a malformed one. Say which it was, so the log
+    # reads "raise the cap", not "the model wrote garbage".
+    if data.get("stop_reason") == "max_tokens":
+        raise ExtractError(
+            "response hit the %d-token output cap and was truncated"
+            % ANTHROPIC_MAX_TOKENS)
     parts = []
     for block in data.get("content") or []:
         if block.get("type") == "text":

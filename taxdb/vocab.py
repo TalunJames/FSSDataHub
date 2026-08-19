@@ -380,7 +380,7 @@ def validate_threshold(t, index=0):
         errs.append("threshold[%d]: %s" % (index, msg))
 
     st = t.get("state_usps")
-    if not st or len(str(st)) != 2:
+    if not isinstance(st, str) or len(st.strip()) != 2:
         bad("state_usps %r must be a two-letter code" % (st,))
 
     kind = t.get("jurisdiction_kind")
@@ -451,7 +451,7 @@ def validate_grant(g, index=0):
         errs.append("grant[%d]: %s" % (index, msg))
 
     st = g.get("state_usps")
-    if not st or len(str(st)) != 2:
+    if not isinstance(st, str) or len(st.strip()) != 2:
         bad("state_usps %r must be a two-letter code" % (st,))
 
     kind = g.get("jurisdiction_kind")
@@ -522,7 +522,7 @@ def validate_profile(p, index=0):
         errs.append("profile[%d]: %s" % (index, msg))
 
     st = p.get("state_usps")
-    if not st or len(str(st)) != 2:
+    if not isinstance(st, str) or len(st.strip()) != 2:
         bad("state_usps %r must be a two-letter code" % (st,))
 
     for key, allowed in PROFILE_FIELDS.items():

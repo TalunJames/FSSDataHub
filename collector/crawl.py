@@ -632,7 +632,7 @@ def _pdf_text(blob):
         parts = []
         for page in reader.pages[:40]:
             parts.append(page.extract_text() or "")
-        return "\n".join(parts)
+        return "\n".join(parts)[:200000]
     except Exception as exc:
         return "[pdf extract failed: %s]" % exc
 

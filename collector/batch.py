@@ -31,7 +31,7 @@ import uuid
 
 import httpx
 
-from taxdb import db, ingest
+from taxdb import db, ingest, ledger
 
 from . import check, extract, store
 
@@ -112,7 +112,7 @@ def _request_for(settings, model, row):
     prompt = extract._user_prompt(row["packet"], row["doc_text"])
     params = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": extract.ANTHROPIC_MAX_TOKENS,
         "system": [{"type": "text", "text": extract.SYSTEM,
                     "cache_control": {"type": "ephemeral"}}],
         "messages": [{"role": "user", "content": prompt}],
@@ -145,9 +145,31 @@ def submit(conn, settings, limit=None):
         remote = (r.json() or {}).get("id")
         if not remote:
             raise extract.ExtractError("batch submit returned no id")
+    except httpx.HTTPError as exc:
+        if not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+            # The request may have reached the provider before the connection
+            # died. Requeueing here would post the same batch twice and pay
+            # for both, so the items park as submitted under an 'unconfirmed'
+            # batch and reconcile_unconfirmed() adopts or requeues them.
+            conn.execute(
+                "UPDATE extract_batch SET status='unconfirmed', message=? "
+                "WHERE id=?",
+                ("submit outcome unknown: %s" % str(exc)[:400], batch_id))
+            conn.executemany(
+                "UPDATE extract_batch_item SET batch_id=?, status='submitted' "
+                "WHERE id=?", [(batch_id, r["id"]) for r in rows])
+            conn.commit()
+            raise
+        # Never left this machine: the items stay 'queued' and the next tick
+        # tries again. Only the batch row is marked failed, for the log.
+        conn.execute(
+            "UPDATE extract_batch SET status='failed', message=? WHERE id=?",
+            (str(exc)[:500], batch_id))
+        conn.commit()
+        raise
     except Exception as exc:
-        # The items stay 'queued', so the next tick tries again. Only the batch
-        # row is marked failed, which keeps the failure visible in the log.
+        # The provider answered (an HTTP status or a bad body), so nothing
+        # was accepted. Items stay 'queued' for the next tick.
         conn.execute(
             "UPDATE extract_batch SET status='failed', message=? WHERE id=?",
             (str(exc)[:500], batch_id))
@@ -168,6 +190,66 @@ def in_flight(conn):
     return conn.execute(
         "SELECT * FROM extract_batch WHERE status IN ('submitted','ended') "
         "ORDER BY id").fetchall()
+
+
+def reconcile_unconfirmed(conn, settings):
+    """Resolve batches whose submit outcome was never learned.
+
+    Lists the provider's recent batches. One that no local row knows about
+    and whose request count matches is our lost submit: adopt its id and
+    poll it like any other. If nothing at the provider can be it and the
+    batch is old enough that a slow accept is off the table, the items go
+    back to 'queued' — one submission is paid either way, never two.
+    """
+    rows = conn.execute(
+        "SELECT * FROM extract_batch WHERE status='unconfirmed' ORDER BY id"
+    ).fetchall()
+    if not rows:
+        return 0
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            r = client.get(API, params={"limit": 20}, headers=_headers(settings))
+        if r.status_code >= 400:
+            return 0
+        remote = (r.json() or {}).get("data") or []
+    except Exception:
+        return 0
+
+    known = {x["remote_id"] for x in conn.execute(
+        "SELECT remote_id FROM extract_batch WHERE remote_id IS NOT NULL")}
+
+    def n_requests(b):
+        rc = b.get("request_counts") or {}
+        return sum(v for v in rc.values() if isinstance(v, int))
+
+    resolved = 0
+    for row in rows:
+        matches = [b for b in remote
+                   if b.get("id") and b["id"] not in known
+                   and n_requests(b) == row["n_items"]]
+        if len(matches) == 1:
+            conn.execute(
+                "UPDATE extract_batch SET remote_id=?, status='submitted', "
+                "submitted_at=?, message='adopted after an ambiguous submit' "
+                "WHERE id=?", (matches[0]["id"], db.now(), row["id"]))
+            known.add(matches[0]["id"])
+            resolved += 1
+            continue
+        aged = conn.execute(
+            "SELECT 1 FROM extract_batch WHERE id=? AND "
+            "created_at < datetime('now', '-2 hours')", (row["id"],)).fetchone()
+        if not matches and aged:
+            conn.execute(
+                "UPDATE extract_batch SET status='failed', "
+                "message='submit never reached the provider; items requeued' "
+                "WHERE id=?", (row["id"],))
+            conn.execute(
+                "UPDATE extract_batch_item SET status='queued', batch_id=NULL "
+                "WHERE batch_id=? AND status='submitted'", (row["id"],))
+            resolved += 1
+    if resolved:
+        conn.commit()
+    return resolved
 
 
 def poll(conn, settings, batch_row):
@@ -232,20 +314,42 @@ def collect(conn, settings, batch_row):
         outcome = (res.get("result") or {})
         kind = outcome.get("type")
         if kind == "succeeded":
-            raw = _text_of(outcome.get("message"))
+            msg = outcome.get("message") or {}
+            raw = _text_of(msg)
             err = None
+            if msg.get("stop_reason") == "max_tokens":
+                # Truncated JSON fails the parse downstream; name the real
+                # cause here so the item's error says what happened.
+                raw, err = None, "batch result truncated at the output cap"
         else:
             raw, err = None, "batch result %s: %s" % (
                 kind, json.dumps(outcome.get("error") or {})[:200])
+        # status guard: a partially collected batch stays 'ended' and is
+        # collected again next tick. Without the guard, items already applied
+        # ('done') were flipped back to 'ready' and re-ingested — with a
+        # second checker call each, the exact spend batching exists to avoid.
         conn.execute(
             "UPDATE extract_batch_item SET status='ready', raw_response=?, "
-            "error=? WHERE id=?", (raw, err, item["id"]))
+            "error=? WHERE id=? AND status='submitted'", (raw, err, item["id"]))
         landed += 1
+    # Anything the provider never answered for would otherwise sit at
+    # 'submitted' forever, with its work item parked at awaiting_ai where
+    # neither claim() nor the stale sweep will ever pick it up again. Fail it
+    # toward the queue instead.
+    orphans = conn.execute(
+        "SELECT id, geoid, category FROM extract_batch_item "
+        "WHERE batch_id=? AND status='submitted'", (batch_row["id"],)).fetchall()
+    for o in orphans:
+        conn.execute(
+            "UPDATE extract_batch_item SET status='failed', "
+            "error='no result returned for this item' WHERE id=?", (o["id"],))
+        ledger.set_status(conn, o["geoid"], o["category"], "pending",
+                          error="batch returned no result — requeued")
     conn.execute(
         "UPDATE extract_batch SET status='collected', collected_at=? WHERE id=?",
         (db.now(), batch_row["id"]))
     conn.commit()
-    return {"landed": landed, "unknown": unknown}
+    return {"landed": landed, "unknown": unknown, "orphaned": len(orphans)}
 
 
 def ready(conn, limit=25):
@@ -264,6 +368,10 @@ def apply_ready(conn, settings, limit=25, apply_result=None):
     """Ingest and check a metered number of downloaded results."""
     apply_result = apply_result or apply_one
     done = failed = 0
+    # Tallied per batch: one metered pass can apply items from several
+    # batches, and crediting them all to the last item's batch made the
+    # per-batch counts fiction.
+    per_batch = {}
     for item in ready(conn, limit):
         try:
             ok = apply_result(conn, settings, item, item["raw_response"],
@@ -277,12 +385,13 @@ def apply_ready(conn, settings, limit=25, apply_result=None):
             ok = False
         done += 1 if ok else 0
         failed += 0 if ok else 1
-    if done or failed:
+        d, f = per_batch.get(item["batch_id"], (0, 0))
+        per_batch[item["batch_id"]] = (d + (1 if ok else 0), f + (0 if ok else 1))
+    for batch_id, (d, f) in per_batch.items():
         conn.execute(
             "UPDATE extract_batch SET n_succeeded=n_succeeded+?, "
-            "n_failed=n_failed+? WHERE id=("
-            "  SELECT batch_id FROM extract_batch_item WHERE id=?)",
-            (done, failed, item["id"]))
+            "n_failed=n_failed+? WHERE id=?", (d, f, batch_id))
+    if per_batch:
         conn.commit()
     return {"done": done, "failed": failed}
 
@@ -339,7 +448,8 @@ def apply_one(conn, settings, item, raw, err):
     ingest.stamp_doc(doc, geoid=geoid, category=category, state_usps=state,
                      researcher=researcher)
     res = ingest.load_doc(conn, doc, allow_partial=True,
-                          label="batch:%s/%s" % (geoid, category))
+                          label="batch:%s/%s" % (geoid, category),
+                          work_item=(geoid, category))
 
     if res["written"] == 0:
         if category == ELECTIONS and not res["rejected"]:
@@ -390,6 +500,7 @@ def tick(conn, settings):
     """
     out = {"collected": 0, "failed": 0, "submitted": 0, "batches": 0,
            "waiting": 0, "ready": 0}
+    reconcile_unconfirmed(conn, settings)
     for row in in_flight(conn):
         try:
             status = row["status"] if row["status"] == "ended" else poll(
@@ -400,6 +511,9 @@ def tick(conn, settings):
             collect(conn, settings, row)
             out["batches"] += 1
         except Exception as exc:
+            # Discard any half-applied collect before recording the failure,
+            # so the batch retries from a clean slate next tick.
+            conn.rollback()
             conn.execute(
                 "UPDATE extract_batch SET message=? WHERE id=?",
                 (str(exc)[:500], row["id"]))

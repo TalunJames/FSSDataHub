@@ -36,7 +36,9 @@ EXPAND = "expand"
 REFRESH = "refresh"
 
 # Actions that hit the network hard and are pointless to retry immediately.
-COOLDOWN_HOURS = {SEED: 6, SST: 12, COG: 24, STATUTES: 12}
+# SOURCES is here because next_action returns it whenever the source table is
+# empty; if seeding it ever fails, an uncooled retry is a hot loop.
+COOLDOWN_HOURS = {SEED: 6, SOURCES: 1, SST: 12, COG: 24, STATUTES: 12}
 
 
 def enabled(settings):
@@ -87,7 +89,8 @@ def next_action(conn, settings):
             return None
         return SEED, {}, "Downloading the list of every US county and city"
 
-    if _count(conn, "SELECT COUNT(*) FROM source") == 0:
+    if _count(conn, "SELECT COUNT(*) FROM source") == 0 \
+            and not _tried_recently(conn, SOURCES, COOLDOWN_HOURS[SOURCES]):
         return SOURCES, {}, "Recording the state revenue agency for each state"
 
     # Bulk files before any crawling: they are free, national, and they park
@@ -160,21 +163,19 @@ def _state_needing_statutes(conn, states):
 
 
 def expand(conn, geoids, settings):
-    """Plan every applicable pass for one chunk of jurisdictions."""
+    """Plan every applicable pass for one chunk of jurisdictions.
+
+    One plan() call for the whole chunk. The old per-geoid loop passed
+    states=[the geoid's state] because plan() had no geoid filter, which
+    planned the entire state once per geoid — the home page said "adding the
+    next 200 places" while tens of thousands of items were being created.
+    """
     cats = list(CATEGORIES)
     if store.as_bool(settings.get("autopilot_elections")):
         cats.append(ELECTIONS)
-    created = 0
-    for geoid in geoids:
-        j = conn.execute(
-            "SELECT state_usps, kind FROM jurisdiction WHERE geoid=?",
-            (geoid,)).fetchone()
-        if not j:
-            continue
-        created += ledger.plan(conn, states=[j["state_usps"]], kinds=(j["kind"],),
-                               categories=cats, limit=None,
-                               batch="autopilot")
-    return created
+    return ledger.plan(conn, kinds=("county", "place", "mcd", "state"),
+                       categories=cats, geoids=list(geoids),
+                       batch="autopilot")
 
 
 def progress(conn, settings):
@@ -193,9 +194,13 @@ def progress(conn, settings):
         "WHERE w.status='complete' AND j.kind IN ('county','place'))") or 0
     juris_total = _count(conn, "SELECT COUNT(*) FROM jurisdiction "
                                "WHERE kind IN ('county','place')")
+    # Same kind filter as juris_total: counting completed state and mcd items
+    # against a county/place denominator sent the header over 100% and the
+    # "places left" figure negative.
     juris_done = _count(
-        conn, "SELECT COUNT(*) FROM (SELECT DISTINCT geoid FROM work_item "
-              "WHERE status='complete')")
+        conn, "SELECT COUNT(*) FROM (SELECT DISTINCT w.geoid FROM work_item w "
+              "JOIN jurisdiction j ON j.geoid=w.geoid "
+              "WHERE w.status='complete' AND j.kind IN ('county','place'))")
     states_total = _count(conn, "SELECT COUNT(*) FROM jurisdiction WHERE kind='state'")
     states_done = _count(
         conn, "SELECT COUNT(*) FROM work_item w JOIN jurisdiction j "

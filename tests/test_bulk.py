@@ -5,34 +5,48 @@ from tests._db import DbTest
 
 class CogParseTests(DbTest):
     def test_county_and_place_geoids(self):
+        """GOVS IDs carry Census codes, not FIPS. Ohio is Census 36 and FIPS
+        39: reading the Census code as FIPS filed Ohio's collections under
+        Pennsylvania (GOVS 39). Counties match by PID name, never by the
+        sequential Census county number."""
         from taxdb.cog import parse_dat, parse_pid, geoid_for
-        pid_line = (
-            "392001110693WEST UNION VILLAGE" + " " * (64 - 18)
-            + "Adams" + " " * (35 - 5)
-            + "84294   314722             093022"
-        )
-        # Build a 146-char PID row by the documented offsets.
-        ident = "392001110693"
-        name = "WEST UNION VILLAGE".ljust(64)
-        county = "Adams".ljust(35)
-        place = "84294"
-        rest = "   314722             093022"
-        pid_line = ident + name + county + place + rest
+
+        # Build PID rows by the documented offsets. Census state 36 = OH.
+        ident = "362001110693"
+        pid_line = (ident + "WEST UNION VILLAGE".ljust(64)
+                    + "Adams".ljust(35) + "84294"
+                    + "   314722             093022")
+        county_ident = "361001000000"
+        county_line = (county_ident + "ADAMS COUNTY".ljust(64)
+                       + "Adams".ljust(35) + "     "
+                       + "   314722             093022")
         self.assertGreaterEqual(len(pid_line), 116)
-        pid = parse_pid(pid_line + "\n")
+        pid = parse_pid(pid_line + "\n" + county_line + "\n")
         self.assertEqual(pid[ident]["place_fips"], "84294")
 
-        dat = "391001000000T01         1232022R\n"
+        counties = {("39", "adamscounty"): "39001"}
+
+        dat = "361001000000T01         1232022R\n"
         rec = next(parse_dat(dat))
         self.assertEqual(rec["item"], "T01")
         self.assertEqual(rec["gtype"], "1")
-        self.assertEqual(geoid_for(rec, {}), "39001")
+        self.assertEqual(geoid_for(rec, pid, counties), "39001")
+
+        # A state row: Census 36 must land on FIPS 39 (OH), not stay 36 (NY).
+        rec_state = {"id": "360000000000", "fips": "36", "gtype": "0",
+                     "county": "000", "unit": "000000"}
+        self.assertEqual(geoid_for(rec_state, pid, counties), "39")
 
         rec_city = {
-            "id": ident, "fips": "39", "gtype": "2", "county": "001",
+            "id": ident, "fips": "36", "gtype": "2", "county": "001",
             "unit": "110693", "item": "T09", "amount": 10,
         }
-        self.assertEqual(geoid_for(rec_city, pid), "3984294")
+        self.assertEqual(geoid_for(rec_city, pid, counties), "3984294")
+
+        # Out-of-range Census codes map to nothing rather than raising.
+        rec_bad = {"id": "990000000000", "fips": "99", "gtype": "0",
+                   "county": "000", "unit": "000000"}
+        self.assertIsNone(geoid_for(rec_bad, pid, counties))
 
 
 class StatuteGrepTests(DbTest):
