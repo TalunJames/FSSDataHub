@@ -87,7 +87,7 @@ DEFAULTS = {
     "openai_base_url": "https://api.openai.com/v1",
     "openai_model": "gpt-4o-mini",
     "anthropic_api_key": "",
-    "anthropic_model": "claude-sonnet-5",
+    "anthropic_model": "claude-haiku-4-5",
     "llama_base_url": "http://host.docker.internal:11434",
     "llama_api_key": "",
     "llama_model": "qwen3-fast",
@@ -119,6 +119,14 @@ DEFAULTS = {
                                # with Anthropic, claude-haiku-4-5 keeps checks cheap
     "checker_max_chars": "80000",   # match max_text_chars: a quote in the
                                    # back half of the documents must be findable
+    # Spending checkpoint. Claude usage is metered from each response's token
+    # counts at published rates; after every spend_stop_usd of estimated spend
+    # the collector pauses itself (continuous mode AND the schedule) until
+    # Start is pressed again. 0 turns the checkpoint off. The other two keys
+    # are the meter's own state, not knobs.
+    "spend_stop_usd": "100",
+    "spend_total_usd": "0",
+    "spend_ack_usd": "0",
     # The version whose welcome screen was acknowledged. When it trails the
     # running version, page loads land on /welcome once so an update is seen
     # and anything new that needs a decision gets one.
@@ -127,8 +135,9 @@ DEFAULTS = {
 
 # Shown as suggestions in the settings UI; the field stays free-text.
 ANTHROPIC_MODELS = (
-    "claude-sonnet-5",    # recommended: strong extraction at reasonable cost
-    "claude-haiku-4-5",   # cheapest; fine for the checker or simple pages
+    "claude-haiku-4-5",   # the default: cheapest; the second checker and the
+                          # Review page catch what a small model misreads
+    "claude-sonnet-5",    # stronger extraction at about triple the price
     "claude-opus-5",      # deepest reading; slowest and priciest
 )
 
@@ -152,6 +161,18 @@ VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
 # Shown on the welcome screen after an update. Plain words, newest release
 # only — this is read by the owner, not a developer.
 WHATS_NEW = (
+    ("A hard stop at every $100 of spending",
+     "Claude reading costs are now metered from each response's own token "
+     "counts. After every $100 (change the amount in Settings, under 'How "
+     "fast it reads') the collector pauses itself — continuous mode and the "
+     "overnight schedule both — and waits for you to press Start before "
+     "spending the next $100. Set it to 0 to turn the checkpoint off."),
+    ("Reading now runs on Claude Haiku, the cheapest model",
+     "The reader model default changed from Sonnet to Haiku, cutting the "
+     "per-item price to a third. The double-check and the Review page are "
+     "the quality net: watch how much lands in Review over the first state "
+     "or two, and switch back to claude-sonnet-5 in Settings if the review "
+     "pile grows faster than you can keep up with."),
     ("A large round of fixes under the hood",
      "The crawler stops wandering into careers pages and staff directories, "
      "re-archives documents whose contents changed, and reads old county "

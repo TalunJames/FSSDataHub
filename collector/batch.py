@@ -33,7 +33,7 @@ import httpx
 
 from taxdb import db, ingest, ledger
 
-from . import check, extract, store
+from . import check, extract, spend, store
 
 API = "https://api.anthropic.com/v1/messages/batches"
 
@@ -376,9 +376,17 @@ def collect(conn, settings, batch_row):
         # collected again next tick. Without the guard, items already applied
         # ('done') were flipped back to 'ready' and re-ingested — with a
         # second checker call each, the exact spend batching exists to avoid.
-        conn.execute(
+        cur = conn.execute(
             "UPDATE extract_batch_item SET status='ready', raw_response=?, "
             "error=? WHERE id=? AND status='submitted'", (raw, err, item["id"]))
+        if cur.rowcount and kind == "succeeded":
+            # Metered only when the row actually flipped, so a re-collected
+            # batch cannot count the same result's spend twice.
+            msg = outcome.get("message") or {}
+            spend.record(
+                conn,
+                msg.get("model") or extract.default_model(settings, "anthropic"),
+                msg.get("usage") or {}, batch=True, commit=False)
         landed += 1
     # Anything the provider never answered for would otherwise sit at
     # 'submitted' forever, with its work item parked at awaiting_ai where
@@ -590,7 +598,10 @@ def tick(conn, settings):
         out["requeued"] = requeue_queued(conn) if depth else 0
         return out
     floor = store.as_int(settings.get("batch_min_items"), 25)
-    if depth and (depth >= floor or not out["waiting"]):
+    # The spending checkpoint holds submissions too: parked items are crawled
+    # but unread, and reading them is the spend the checkpoint exists to gate.
+    if depth and (depth >= floor or not out["waiting"]) \
+            and not spend.over_budget_db(conn):
         _, n = submit(conn, settings)
         out["submitted"] = n
     return out

@@ -101,6 +101,11 @@
       <label class="seg-opt"><input type="radio" name="batch_extract" value="0" {% if settings.batch_extract!='1' %}checked{% endif %}>Right away</label>
     </div>
     <p class="hint" style="margin-top:10px">In batches, a page is crawled and archived now and read a little later, so the work list shows items waiting to be read. The double-check still runs on every result the moment it lands, so what comes to you does not change. Claude only.</p>
+    <div class="grid2" style="margin-top:14px">
+      <label>Pause after each <span class="dim">$ of Claude reading · 0 = never</span>
+        <input type="number" name="spend_stop_usd" min="0" max="100000" step="1" value="{{ settings.spend_stop_usd }}"></label>
+    </div>
+    <p class="hint">A hard stop on spending. Costs are metered from each response's own token counts at published Claude rates — estimated ${{ '%.2f'|format(settings.spend_total_usd|float) }} spent so far. At each checkpoint the collector pauses everything, including the overnight schedule, and waits for you to press Start.</p>
   </section>
 
   <details class="adv">

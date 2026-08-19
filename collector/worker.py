@@ -22,7 +22,7 @@ import traceback
 from taxdb import db, ingest, ledger, packets, seed as seedmod, sources, coverage
 from taxdb.vocab import ELECTIONS, FRAMEWORK, WORK_CATEGORIES
 
-from . import autopilot, batch, check, crawl, extract, intake, store
+from . import autopilot, batch, check, crawl, extract, intake, spend, store
 from .settings import VALID_CATEGORIES, VALID_KINDS
 
 _cancel = threading.Event()
@@ -160,6 +160,18 @@ def _loop():
                 s = store.get_all(conn)
             finally:
                 conn.close()
+            if spend.over_budget(s):
+                # The spending checkpoint. pause() turns off continuous mode
+                # and the schedule and stamps the acknowledgment, so this
+                # fires once per crossed step, not once per loop.
+                conn = store.connect()
+                try:
+                    msg = spend.pause(conn)
+                finally:
+                    conn.close()
+                _set(state="idle", mode=None, step="", message=msg)
+                time.sleep(5)
+                continue
             if store.as_bool(s.get("continuous_enabled")):
                 # Claim a full batch per run so the run table stays readable;
                 # the cancel flag is still checked between items.
@@ -428,6 +440,11 @@ def _run_batch(mode, limit):
                             tally["findings"] += n_find
                         store.bump_run(wconn, run_id, items=1, pages=n_pages,
                                        findings=n_find)
+                        if spend.over_budget_db(wconn):
+                            # Checkpoint crossed mid-batch: stop the pool now
+                            # rather than finishing the batch. The coordinator
+                            # loop does the pause bookkeeping.
+                            _cancel.set()
                     except (Exception, SystemExit) as exc:
                         # One unresearchable jurisdiction must not take the
                         # other nineteen down with it. Return it to the queue

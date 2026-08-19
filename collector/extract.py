@@ -144,6 +144,20 @@ RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504, 529)
 # real extraction failure.
 PROVIDER_DOWN = "provider unavailable"
 
+# Set by collector.spend at import: receives (provider, model, usage_dict)
+# for every successful call so spending can be metered where it happens.
+# Must never raise into the extraction path.
+USAGE_HOOK = None
+
+
+def _report_usage(provider, model, usage):
+    if USAGE_HOOK is None:
+        return
+    try:
+        USAGE_HOOK(provider, model, usage or {})
+    except Exception:
+        pass
+
 
 def _status_error(prefix, status, body):
     text = "%s %s: %s" % (prefix, status, (body or "")[:400])
@@ -185,7 +199,7 @@ def default_model(settings, provider=None):
     if provider == "openai":
         return settings.get("openai_model") or "gpt-4o-mini"
     if provider == "anthropic":
-        return settings.get("anthropic_model") or "claude-sonnet-5"
+        return settings.get("anthropic_model") or "claude-haiku-4-5"
     if provider == "llama":
         return settings.get("llama_model") or "llama3.1"
     return None
@@ -373,6 +387,7 @@ def _anthropic(api_key, model, prompt, images=None, system=SYSTEM, effort=None):
         if r.status_code >= 400:
             raise _status_error("Anthropic API", r.status_code, r.text)
         data = r.json()
+    _report_usage("anthropic", model, data.get("usage"))
     # A truncated answer is not a malformed one. Say which it was, so the log
     # reads "raise the cap", not "the model wrote garbage".
     if data.get("stop_reason") == "max_tokens":
