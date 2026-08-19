@@ -126,21 +126,237 @@ NATIONAL = [
      "https://www.openicpsr.org/openicpsr/project/208462",
      "secondary", 4,
      "Local rates 2000-2022, county level. Gap finder only, never a cite. Login required."),
+    ("Census Annual Survey of School System Finances (F-33)",
+     "https://www.census.gov/programs-surveys/school-finances.html",
+     "bulk_file", 2,
+     "Per-district revenue by source for every US school district. Levy/no-levy "
+     "prior for school property taxes; silent on rates."),
+    ("OpenElections results repositories",
+     "https://github.com/openelections",
+     "bulk_file", 3,
+     "Per-state repos of official precinct/county results as CSV. Local measures "
+     "appear where counties reported them. Companion to the Clarify parser entry."),
+    ("MSRB EMMA municipal disclosures",
+     "https://emma.msrb.org/",
+     "portal", 3,
+     "Official statements for every muni bond issue: pledged taxes, rates, "
+     "election results in the OS. Search portal, not bulk; heavy bot defenses."),
+    ("NCSL statewide ballot measures database",
+     "https://www.ncsl.org/elections-and-campaigns/statewide-ballot-measures-database",
+     "secondary", 4,
+     "Statewide measures only -- useful for the framework pass (threshold and cap "
+     "changes arrive as constitutional amendments). Not for local measures."),
+    ("Ballotpedia local ballot measure elections",
+     "https://ballotpedia.org/Local_ballot_measure_elections_in_2026",
+     "secondary", 4,
+     "Broad local-measure tracking, strongest in large counties. URL is "
+     "year-stamped; bump it annually. Orientation and gap finding, never a cite."),
+]
+
+# State-published bulk files and rate databases. Scoped to the state in
+# seed_catalog, so collector.crawl seeds them into every crawl for a
+# jurisdiction in that state. Sales entries exist only for states outside the
+# SST feed above; property/income/lodging/elections entries are the states
+# whose agencies publish real compilations rather than lookup widgets.
+STATE_BULK = [
+    # --- local sales rates, non-SST states ---
+    ("AL", "Alabama DOR sales and use tax rates",
+     "https://www.revenue.alabama.gov/sales-use/tax-rates/",
+     "agency_table", 2,
+     "State-administered local rates, downloadable charts. Self-administered "
+     "cities (Birmingham etc.) publish separately."),
+    ("AK", "Alaska Remote Seller Sales Tax Commission",
+     "https://arsstc.org/",
+     "agency_table", 2,
+     "No state sales tax; ARSSTC compiles member municipalities' local rates "
+     "and boundaries. Non-member boroughs still publish their own."),
+    ("AZ", "Arizona DOR TPT rate table",
+     "https://azdor.gov/business/transaction-privilege-tax/tax-rate-table",
+     "bulk_file", 2,
+     "Monthly rate table for every city and county TPT jurisdiction, "
+     "spreadsheet download."),
+    ("CA", "CDTFA open data portal",
+     "https://www.cdtfa.ca.gov/dataportal/",
+     "bulk_file", 2,
+     "Sales/use rates by city and county incl. district taxes, as datasets. "
+     "Pair with CEDA for the measures that created each district tax."),
+    ("CO", "Colorado DOR sales/use tax rates (DR 1002)",
+     "https://tax.colorado.gov/DR1002",
+     "bulk_file", 2,
+     "Semiannual rate publication for state-collected locals. Home-rule cities "
+     "self-collect and publish their own rates."),
+    ("IL", "Illinois DOR tax rate database",
+     "https://tax.illinois.gov/research/taxrates.html",
+     "agency_table", 2,
+     "Machine-readable local sales rates by jurisdiction, semiannual."),
+    ("LA", "Louisiana Uniform Local Sales Tax Board",
+     "https://lulstb.com/",
+     "agency_table", 2,
+     "Parish-by-parish local rate tables and lookup. Site blocks scripted "
+     "clients; expect the browser fetch path."),
+    ("MO", "Missouri DOR sales/use tax rate tables",
+     "https://dor.mo.gov/taxation/business/tax-types/sales-use/rate-tables/",
+     "bulk_file", 2,
+     "Quarterly downloadable rate tables for every taxing jurisdiction, "
+     "with district detail."),
+    ("NY", "NY Publication 718 sales tax rates",
+     "https://www.tax.ny.gov/pdf/publications/sales/pub718.pdf",
+     "bulk_file", 2,
+     "All county/city rates in one PDF. The 718 series (718-A etc.) covers "
+     "special rates; school district income surcharges live elsewhere."),
+    ("TX", "Texas Comptroller city sales and use tax rates",
+     "https://comptroller.texas.gov/taxes/sales/city.php",
+     "agency_table", 2,
+     "City rates with effective dates; sibling pages carry county, SPD, and "
+     "transit rates. Quarterly updates."),
+    # --- property tax rates and levies ---
+    ("TX", "Texas Comptroller property tax rates and levies",
+     "https://comptroller.texas.gov/taxes/property-tax/rates/index.php",
+     "bulk_file", 2,
+     "Annual rate and levy spreadsheets for every taxing unit, from PTAD "
+     "surveys."),
+    ("OH", "Ohio DOT tax data series -- property",
+     "https://tax.ohio.gov/researcher/tax-analysis/tax-data-series/all-property-taxes",
+     "bulk_file", 2,
+     "Millage by taxing district (DTE tables), yearly Excel. The rate answer "
+     "for every Ohio levy."),
+    ("NJ", "NJ general tax rates by municipality",
+     "https://www.nj.gov/treasury/taxation/lpt/localtax.shtml",
+     "agency_table", 2,
+     "Annual general and effective property tax rates for all 564 "
+     "municipalities."),
+    ("FL", "Florida DOR property tax data portal",
+     "https://floridarevenue.com/property/Pages/DataPortal.aspx",
+     "bulk_file", 2,
+     "Millage by taxing authority (DR-403/DR-420 series) and tax roll data, "
+     "statewide."),
+    ("NY", "NY ORPTS property tax data",
+     "https://www.tax.ny.gov/research/property/default.htm",
+     "bulk_file", 2,
+     "Levies, full-value tax rates, and constitutional tax limit data for "
+     "every local government and school district."),
+    ("WA", "Washington DOR property tax statistics",
+     "https://dor.wa.gov/about/statistics-reports/property-tax-statistics",
+     "bulk_file", 2,
+     "Levy rates and amounts by taxing district, annual workbooks."),
+    ("WI", "Wisconsin DOR reports (town/village/city rates)",
+     "https://www.revenue.wi.gov/Pages/Report/Home.aspx",
+     "bulk_file", 2,
+     "Apportioned property tax rates and levies per municipality and school "
+     "district."),
+    ("MI", "Michigan Treasury millage rate reports",
+     "https://www.michigan.gov/taxes/property/estimator/related/millage-rates",
+     "bulk_file", 2,
+     "Statewide millage exports per year (L-4029 rollup). The estimator's "
+     "database backs it."),
+    ("MN", "Minnesota DOR property tax reports",
+     "https://www.revenue.state.mn.us/property-tax-reports",
+     "bulk_file", 2,
+     "Levies and rates by county, city, and special district; voter-approved "
+     "referendum levies broken out."),
+    ("IL", "Illinois DOR property tax statistics",
+     "https://tax.illinois.gov/research/taxstats/propertytaxstatistics.html",
+     "bulk_file", 2,
+     "District-level rates and extensions (tables 27-28), annual."),
+    ("KS", "Kansas DOR property valuation statistics",
+     "https://www.ksrevenue.gov/pvdstatistics.html",
+     "bulk_file", 2,
+     "County clerk levy sheets rolled up: mill levies for every taxing "
+     "subdivision."),
+    # --- local income / payroll ---
+    ("OH", "Ohio municipal income tax rate database (The Finder)",
+     "https://thefinder.tax.ohio.gov/",
+     "agency_table", 2,
+     "Downloadable rate database for every municipal income tax and school "
+     "district income tax. The income answer for Ohio."),
+    ("PA", "PA DCED municipal statistics (EIT/LST register)",
+     "https://dced.pa.gov/local-government/municipal-statistics/",
+     "agency_table", 2,
+     "The official register of earned income and local services tax rates for "
+     "every PA municipality and school district. munstats.pa.gov blocks "
+     "scripted clients; enter from this page."),
+    ("IN", "Indiana DOR Departmental Notice #1",
+     "https://www.in.gov/dor/files/dn01.pdf",
+     "bulk_file", 2,
+     "All 92 county local income tax rates in one PDF, updated as rates "
+     "change."),
+    ("MD", "Maryland DLS local tax rates report",
+     "https://dls.maryland.gov/pubs/prod/NoPblTabPDF/2026CountyLocalTaxRates.pdf",
+     "bulk_file", 2,
+     "County income, property, recordation, and transfer rates in one annual "
+     "PDF. URL is year-stamped; bump it annually."),
+    ("MI", "Michigan city income tax",
+     "https://www.michigan.gov/taxes/citytax",
+     "agency_table", 2,
+     "The complete list of Michigan's city income taxes and rates."),
+    # --- lodging and local-option taxes ---
+    ("FL", "Florida EDR county and municipal data",
+     "https://edr.state.fl.us/Content/local-government/data/county-municipal/index.cfm",
+     "bulk_file", 2,
+     "Local option taxes (tourist development, discretionary surtax, fuel) "
+     "with rates and adoption history, per county. Best lodging source in FL."),
+    ("TX", "Texas hotel occupancy tax reporting",
+     "https://comptroller.texas.gov/transparency/local/hotel-reporting/",
+     "bulk_file", 2,
+     "Municipal HOT rates and receipts, self-reported to the Comptroller."),
+    # --- election results for the measures pass ---
+    ("OH", "Ohio SOS election results and data",
+     "https://www.ohiosos.gov/elections/election-results-and-data/",
+     "portal", 2,
+     "Questions and issues results as per-election spreadsheets, statewide. "
+     "403s scripted clients; use the browser fetch path."),
+    ("WA", "Washington SOS election data and research",
+     "https://www.sos.wa.gov/elections/data-research",
+     "portal", 2,
+     "Results archives incl. local measures, plus voter turnout by county."),
+    ("TX", "Texas Bond Review Board local debt data",
+     "https://www.brb.texas.gov/",
+     "bulk_file", 2,
+     "Local government debt outstanding and bond election data, annual "
+     "spreadsheets by issuer."),
+    ("CA", "California City Finance (Coleman)",
+     "https://californiacityfinance.com/",
+     "secondary", 4,
+     "Tracks every CA local revenue measure with pass/fail and vote shares. "
+     "Cross-check for CEDA; cite the county canvass, not this."),
 ]
 
 
+def _state_fips(conn, usps):
+    row = conn.execute("SELECT state_fips FROM jurisdiction WHERE kind='state' "
+                       "AND state_usps=?", (usps,)).fetchone()
+    return row["state_fips"] if row else None
+
+
+def _seed_scoped(conn, usps, name, url, stype, tier, note):
+    """Seed a state-scoped source, adopting any row seeded before states existed.
+
+    `init --with-sources` runs before `seed`, so a first pass can store these
+    with a NULL scope; without the adoption the post-seed pass would insert a
+    scoped duplicate (UNIQUE is on url+scope).
+    """
+    scope = _state_fips(conn, usps)
+    if scope:
+        conn.execute(
+            "UPDATE source SET scope_geoid=? WHERE url=? AND scope_geoid IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM source WHERE url=? AND scope_geoid=?)",
+            (scope, url, url, scope))
+    return db.get_or_create_source(conn, url, name, source_type=stype,
+                                   authority_tier=tier, scope_geoid=scope,
+                                   notes=note)
+
+
 def seed_catalog(conn):
-    """Insert state agency and national sources as unverified leads."""
+    """Insert state agency, state bulk, and national sources as unverified leads."""
     n = 0
     for usps, (name, url) in STATE_AGENCIES.items():
-        row = conn.execute("SELECT state_fips FROM jurisdiction WHERE kind='state' "
-                           "AND state_usps=?", (usps,)).fetchone()
-        scope = row["state_fips"] if row else None
-        db.get_or_create_source(conn, url, name, source_type="agency_table",
-                                authority_tier=2, scope_geoid=scope,
-                                notes="Seeded entry point; not yet content-verified.")
+        _seed_scoped(conn, usps, name, url, "agency_table", 2,
+                     "Seeded entry point; not yet content-verified.")
         conn.execute("UPDATE state_profile SET revenue_agency=?, revenue_agency_url=? "
                      "WHERE state_usps=?", (name, url, usps))
+        n += 1
+    for usps, name, url, stype, tier, note in STATE_BULK:
+        _seed_scoped(conn, usps, name, url, stype, tier, note)
         n += 1
     for name, url, stype, tier, note in NATIONAL:
         db.get_or_create_source(conn, url, name, source_type=stype,
