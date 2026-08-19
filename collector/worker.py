@@ -532,7 +532,9 @@ def _process(conn, client, s, run_id, row, slot=0):
              "set a provider and return to queue" % n_pages)
         return n_pages, 0
 
-    packet = packets.build(conn, geoid, [category])
+    # lean: the packet rides in the uncached user message; the rules it
+    # would repeat are already in the extractor's cached system prompt.
+    packet = packets.build(conn, geoid, [category], lean=True)
     researcher = s.get("researcher") or "collector"
 
     if batch.enabled(s):
@@ -563,7 +565,8 @@ def _process(conn, client, s, run_id, row, slot=0):
                      researcher=researcher)
 
     res = ingest.load_doc(conn, doc, allow_partial=True,
-                          label="crawl:%s/%s" % (geoid, category))
+                          label="crawl:%s/%s" % (geoid, category),
+                          work_item=(geoid, category))
 
     if res["written"] == 0:
         # An empty answer is a real answer for the elections pass: this county

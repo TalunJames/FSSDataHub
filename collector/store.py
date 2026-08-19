@@ -64,6 +64,38 @@ def _migrate(conn):
         conn.execute("PRAGMA foreign_keys=ON")
         conn.commit()
 
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='extract_batch'"
+    ).fetchone()
+    if row and "unconfirmed" not in (row["sql"] or ""):
+        # Older CHECK lacks the 'unconfirmed' status an ambiguous submit
+        # parks under. Same rebuild dance as crawl_run above.
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        conn.execute("ALTER TABLE extract_batch RENAME TO extract_batch_old")
+        conn.execute(
+            "CREATE TABLE extract_batch ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " remote_id TEXT UNIQUE,"
+            " provider TEXT NOT NULL,"
+            " model TEXT,"
+            " status TEXT NOT NULL CHECK (status IN ("
+            "   'building','submitted','ended','collected','failed',"
+            "   'unconfirmed')),"
+            " n_items INTEGER NOT NULL DEFAULT 0,"
+            " n_succeeded INTEGER NOT NULL DEFAULT 0,"
+            " n_failed INTEGER NOT NULL DEFAULT 0,"
+            " created_at TEXT NOT NULL,"
+            " submitted_at TEXT, collected_at TEXT, message TEXT)")
+        conn.execute("INSERT INTO extract_batch SELECT * FROM extract_batch_old")
+        conn.execute("DROP TABLE extract_batch_old")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_eb_status "
+                     "ON extract_batch(status, id)")
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
+
     # One-time model upgrade: installs that never entered an Anthropic key
     # still carry the old default model. Never touches a key the user has set,
     # and the marker keeps it from ever re-running.
@@ -196,8 +228,12 @@ def sanitize_updates(current, body):
     for k, v in body.items():
         if k not in current and k not in SECRET_KEYS:
             continue
-        if k in SECRET_KEYS and isinstance(v, str) and "*" in v:
-            continue
+        if k in SECRET_KEYS:
+            # Coerce before testing: a non-string value (a number, a list,
+            # null) must not slip past the mask check and overwrite or wipe
+            # the stored key. Only a plain star-free string is a new secret.
+            if not isinstance(v, str) or "*" in v or v == "":
+                continue
         updates[k] = v if v is None else str(v)
     return updates
 
@@ -208,7 +244,12 @@ def mask(settings):
     for k in SECRET_KEYS:
         v = out.get(k) or ""
         if v:
-            out[k] = ("*" * max(0, len(v) - 4)) + v[-4:]
+            # Short values would render fully or nearly unmasked by the
+            # length-based form; below 9 characters show only stars.
+            if len(v) > 8:
+                out[k] = ("*" * (len(v) - 4)) + v[-4:]
+            else:
+                out[k] = "*" * 8
             out[k + "_set"] = True
         else:
             out[k] = ""

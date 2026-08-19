@@ -5,20 +5,28 @@ that the jurisdiction likely does not levy that tax -- confirm before
 writing authorized_not_levied. Amounts populate revenue_base as USD.
 
 2022 public-use layout (32-char records):
-  1-12  ID (FIPS state, type, FIPS county, unit)
+  1-12  ID (Census state, type, Census county, unit)
   13-15 item code
   16-27 amount in thousands of dollars
   28-31 year
   32    imputation flag
 
-PID directory supplies FIPS place codes for municipalities.
+The ID is a Census GOVS identifier: its state code is the gapless 01-51
+*Census* sequence, not FIPS (OH is 36, not 39), and its county code is the
+Census sequential county number, not the odd-numbered FIPS code. Treating
+either as FIPS files collections against the wrong state or county — the
+exact trap `fips.py` and the census_gid_crosswalk exist to prevent. States go
+through `census_state_to_fips`; counties are matched by the PID directory's
+own name against the seeded jurisdiction list; municipalities use the PID's
+FIPS place code, which genuinely is FIPS.
 """
 
 import io
+import re
 import zipfile
 
 from . import db
-from .fips import FIPS_TO_USPS
+from .fips import census_state_to_fips
 from .seed import fetch
 
 COG_ZIP = ("https://www2.census.gov/programs-surveys/gov-finances/tables/"
@@ -35,9 +43,6 @@ TAX_ITEMS = {
     "T19": ("collections_lodging_meals", "lodging_meals"),
     "T40": ("collections_income_payroll", "income_payroll"),
 }
-
-TYPE_KIND = {"0": "state", "1": "county", "2": "place", "3": "mcd"}
-
 
 def load(conn, force=False):
     """Download the 2022 unit file, map to GEOIDs, write revenue_base."""
@@ -56,12 +61,13 @@ def load(conn, force=False):
     pid = parse_pid(z.read(PID_NAME).decode("latin-1"))
     dat = z.read(DAT_NAME).decode("latin-1")
 
+    counties = county_lookup(conn)
     conn.execute("DELETE FROM revenue_base WHERE vintage=?", (VINTAGE,))
     written, unmapped = 0, 0
     for rec in parse_dat(dat):
         if rec["item"] not in TAX_ITEMS:
             continue
-        geoid = geoid_for(rec, pid)
+        geoid = geoid_for(rec, pid, counties)
         if not geoid:
             unmapped += 1
             continue
@@ -130,14 +136,34 @@ def parse_pid(text):
     return out
 
 
-def geoid_for(rec, pid):
-    fips, gtype, county = rec["fips"], rec["gtype"], rec["county"]
-    if fips not in FIPS_TO_USPS:
+def _norm_name(name):
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def county_lookup(conn):
+    """(state_fips, normalized name) -> county geoid, from the seeded list.
+
+    The GOVS county code is a sequential Census number with no safe arithmetic
+    mapping to FIPS, so counties are matched by their own name instead.
+    """
+    out = {}
+    for r in conn.execute(
+            "SELECT geoid, state_fips, name FROM jurisdiction WHERE kind='county'"):
+        out[(r["state_fips"], _norm_name(r["name"]))] = r["geoid"]
+    return out
+
+
+def geoid_for(rec, pid, counties=None):
+    try:
+        fips = census_state_to_fips(rec["fips"])
+    except (KeyError, ValueError):
         return None
+    gtype = rec["gtype"]
     if gtype == "0":
         return fips
     if gtype == "1":
-        return fips + county
+        info = pid.get(rec["id"]) or {}
+        return (counties or {}).get((fips, _norm_name(info.get("name"))))
     if gtype == "2":
         info = pid.get(rec["id"]) or {}
         place = (info.get("place_fips") or "").strip()

@@ -399,6 +399,32 @@ class AnthropicTuningTests(unittest.TestCase):
         self.assertGreater(levels.index(self.extract.DEFAULT_CHECKER_EFFORT),
                            levels.index(self.extract.DEFAULT_EFFORT))
 
+    def test_truncated_response_reports_the_cap_not_bad_json(self):
+        """A response cut off at max_tokens must say so. Reported as a JSON
+        parse failure, the log reads 'the model wrote garbage' and nobody
+        raises the cap."""
+        from unittest import mock
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"stop_reason": "max_tokens",
+                        "content": [{"type": "text", "text": '{"findings": ['}]}
+
+        class _Client:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def post(self, *a, **k):
+                return _Resp()
+
+        with mock.patch.object(self.extract.httpx, "Client",
+                               return_value=_Client()):
+            with self.assertRaises(self.extract.ExtractError) as ctx:
+                self.extract._anthropic("key", "claude-sonnet-5", "prompt")
+        self.assertIn("truncated", str(ctx.exception))
+
     def test_stale_prompt_caching_beta_header_is_gone(self):
         import inspect
         src = inspect.getsource(self.extract._anthropic)

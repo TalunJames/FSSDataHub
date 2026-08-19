@@ -46,6 +46,23 @@ GEOID `{geoid}` | population {pop} | categories: {cats}
 
 ## Rules
 
+{rules}
+
+## Return format
+
+Write a JSON file matching this shape and load it with `taxdb ingest FILE`:
+
+```json
+{schema}
+```
+"""
+
+# The full rules make a packet a self-contained brief for a human researcher.
+# The collector's model calls already carry all of this in the cached system
+# prompt (extract.SYSTEM), so repeating it in the uncached user message paid
+# for the same ~200 tokens on every one of 22,000 items. The lean form keeps
+# only what the system prompt does not say.
+RULES_FULL = """\
 - Every claim needs a source URL. Prefer primary law (statutes, adopted
   ordinances) and the state agency of record over aggregators and vendors.
 - If a tax is legally available here but not imposed, record it with
@@ -59,16 +76,12 @@ GEOID `{geoid}` | population {pop} | categories: {cats}
 - Dates must be ISO `YYYY-MM-DD`. US formats silently vanish from sunset watch.
 - Include `source_quote`: a short verbatim phrase from the documents that
   contains the rate, the prohibition, or the authorization. `taxdb verify`
-  checks that the quote appears in the archived bytes.
+  checks that the quote appears in the archived bytes."""
 
-## Return format
-
-Write a JSON file matching this shape and load it with `taxdb ingest FILE`:
-
-```json
-{schema}
-```
-"""
+RULES_LEAN = """\
+- Note the fiscal or tax year the figure applies to.
+- `taxdb verify` later checks that `source_quote` appears in the archived
+  bytes, so copy it exactly."""
 
 EXAMPLE = {
     "schema_version": "1.0",
@@ -141,31 +154,49 @@ QUESTIONS = {
 }
 
 
-def build(conn, geoid, categories=None):
+def build(conn, geoid, categories=None, lean=False):
     """Packet for one work item. Routes the two research passes to their own
-    shapes; everything else is the tax-rate packet."""
+    shapes; everything else is the tax-rate packet.
+
+    lean=True drops the rules the model already has in its system prompt.
+    Use it for collector model calls; human-facing packet files keep the
+    full, self-contained rules."""
     j = conn.execute("SELECT * FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     if not j:
         raise SystemExit("no jurisdiction %r" % geoid)
 
-    cats = list(categories) if categories else []
-    if cats == [FRAMEWORK]:
-        return build_framework(conn, j["state_usps"])
-    if cats == [ELECTIONS]:
-        return build_elections(conn, geoid)
+    cats = [c for c in (categories or []) if c]
+    if any(c in (FRAMEWORK, ELECTIONS) for c in cats):
+        # A pass has its own packet shape. Mixing one with anything else used
+        # to fall through to the five-category tax packet — five times the
+        # tokens, and none of them describing the claimed item.
+        if len(set(cats)) > 1:
+            raise SystemExit(
+                "one packet per pass: cannot mix %r in a single packet" % (cats,))
+        if cats[0] == FRAMEWORK:
+            return build_framework(conn, j["state_usps"], lean=lean)
+        return build_elections(conn, geoid, lean=lean)
 
     if categories is None:
         rows = conn.execute(
             "SELECT category FROM work_item WHERE geoid=? AND status IN "
             "('pending','in_progress','needs_review')", (geoid,)).fetchall()
         categories = [r["category"] for r in rows if r["category"] in CATEGORIES]
-    categories = [c for c in (categories or list(CATEGORIES)) if c in CATEGORIES] \
-        or list(CATEGORIES)
+        categories = categories or list(CATEGORIES)
+    else:
+        unknown = [c for c in cats if c not in CATEGORIES]
+        if unknown or not cats:
+            raise SystemExit("unknown packet categories %r" % (unknown or cats,))
+        categories = cats
 
+    # Scoped to the categories being researched and bounded: this text rides
+    # in the model prompt for every item, so an unbounded dump of every live
+    # row across all five categories is paid for on every call.
     known = conn.execute(
         "SELECT category, instrument_code, status, rate_value, rate_unit, retrieved_at "
         "FROM tax_instrument WHERE geoid=? AND superseded_by IS NULL "
-        "ORDER BY category", (geoid,)).fetchall()
+        "AND category IN (%s) ORDER BY category LIMIT 60"
+        % ",".join("?" * len(categories)), [geoid] + list(categories)).fetchall()
     if known:
         known_txt = "\n".join(
             "- `%s` / `%s`: %s%s (as of %s)" % (
@@ -196,9 +227,12 @@ def build(conn, geoid, categories=None):
                        "question for every jurisdiction in the state at once."
                        % j["state_usps"])
 
+    # Bounded: scoped sources accumulate as a place is re-researched, and an
+    # unbounded list grows the prompt of every future packet for this geoid.
     srcs = conn.execute(
         "SELECT name, url, authority_tier FROM source WHERE scope_geoid IN (?,?,?) "
-        "ORDER BY authority_tier", (geoid, j["state_fips"], j["county_fips"])).fetchall()
+        "ORDER BY authority_tier LIMIT 25",
+        (geoid, j["state_fips"], j["county_fips"])).fetchall()
     src_txt = "\n".join("- [tier %d] %s -- %s" % (s["authority_tier"], s["name"], s["url"])
                         for s in srcs) or "_None on file. Start from the state agency of record._"
 
@@ -251,6 +285,7 @@ def build(conn, geoid, categories=None):
         pop="{:,}".format(j["population"]) if j["population"] else "unknown",
         cats=", ".join(categories), known=known_txt, profile=profile_txt,
         sources=src_txt, priors=prior_txt, statutes=statute_txt, questions=q_txt,
+        rules=RULES_LEAN if lean else RULES_FULL,
         schema=json.dumps(example, indent=2),
     )
 
@@ -314,14 +349,7 @@ local sales rate, the statute root URL, and the revenue agency of record.
 
 ## Rules
 
-- Every threshold and every cap needs a source URL and a statute cite. A
-  threshold with no cite cannot be used in front of a client.
-- Thresholds change. When a rule was amended, record the new row with
-  `effective_from` set to the amendment date rather than editing history.
-- Percentages are percentages: 60 means sixty percent.
-- Do not infer one state's rule from a neighbor's. If you cannot find it,
-  omit the row and say so in `notes` on the profile.
-- Dates must be ISO `YYYY-MM-DD`.
+{rules}
 
 ## Return format
 
@@ -329,6 +357,22 @@ local sales rate, the statute root URL, and the revenue agency of record.
 {schema}
 ```
 """
+
+FRAMEWORK_RULES_FULL = """\
+- Every threshold and every cap needs a source URL and a statute cite. A
+  threshold with no cite cannot be used in front of a client.
+- Thresholds change. When a rule was amended, record the new row with
+  `effective_from` set to the amendment date rather than editing history.
+- Percentages are percentages: 60 means sixty percent.
+- Do not infer one state's rule from a neighbor's. If you cannot find it,
+  omit the row and say so in `notes` on the profile.
+- Dates must be ISO `YYYY-MM-DD`."""
+
+FRAMEWORK_RULES_LEAN = """\
+- Thresholds change. When a rule was amended, record the new row with
+  `effective_from` set to the amendment date rather than editing history.
+- If you cannot find a rule, omit the row and say so in `notes` on the
+  profile."""
 
 FRAMEWORK_EXAMPLE = {
     "schema_version": "1.1",
@@ -441,6 +485,17 @@ Secretary of State is second.
 - Whether it was a renewal, and of what.
 
 ## Rules
+
+{rules}
+
+## Return format
+
+```json
+{schema}
+```
+"""
+
+ELECTIONS_RULES_FULL = """\
 - Certified or official results only. Never election-night returns.
 - Record the counts as printed. Do not round, and do not recompute a
   percentage that the source already prints; if they disagree, note it.
@@ -451,14 +506,16 @@ Secretary of State is second.
   that is a second row, not an edit.
 - Dates must be ISO `YYYY-MM-DD`.
 - If you find no measures at all, return an empty `measures` array. That is a
-  real answer and it is recorded as a coverage gap, not as a zero.
+  real answer and it is recorded as a coverage gap, not as a zero."""
 
-## Return format
-
-```json
-{schema}
-```
-"""
+ELECTIONS_RULES_LEAN = """\
+- A measure that lost is as valuable as one that won. Record both.
+- `outcome` is `passed` only when the source says it passed. If it cleared a
+  majority but failed a supermajority or turnout test, that is `failed`.
+- One row per measure. If the same question returned at a later election,
+  that is a second row, not an edit.
+- If you find no measures at all, return an empty `measures` array. That is a
+  real answer and it is recorded as a coverage gap, not as a zero."""
 
 ELECTIONS_EXAMPLE = {
     "schema_version": "1.1",
@@ -501,7 +558,7 @@ ELECTIONS_EXAMPLE = {
 }
 
 
-def build_framework(conn, usps):
+def build_framework(conn, usps, lean=False):
     """State-level packet: thresholds, authority caps, and the profile."""
     usps = (usps or "").upper()
     p = conn.execute("SELECT * FROM state_profile WHERE state_usps=?", (usps,)).fetchone()
@@ -566,6 +623,7 @@ def build_framework(conn, usps):
         sources=src_txt, statutes=statute_txt,
         bases=", ".join("`%s`" % b for b in sorted(THRESHOLD_BASES)),
         classes=", ".join("`%s`" % c for c in sorted(REVENUE_MEASURE_CLASSES)),
+        rules=FRAMEWORK_RULES_LEAN if lean else FRAMEWORK_RULES_FULL,
         schema=json.dumps(example, indent=2),
     )
 
@@ -573,7 +631,7 @@ def build_framework(conn, usps):
 MEASURE_LOOKBACK_YEARS = 12
 
 
-def build_elections(conn, geoid):
+def build_elections(conn, geoid, lean=False):
     """County-level packet: revenue measures and their certified results."""
     j = conn.execute("SELECT * FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     if not j:
@@ -618,20 +676,34 @@ def build_elections(conn, geoid):
         known=known_txt, thresholds=thr_txt, sources=src_txt,
         years=MEASURE_LOOKBACK_YEARS,
         classes=", ".join("`%s`" % c for c in sorted(MEASURE_CLASSES)),
+        rules=ELECTIONS_RULES_LEAN if lean else ELECTIONS_RULES_FULL,
         schema=json.dumps(example, indent=2),
     )
 
 
 def write_batch(conn, rows, outdir):
-    """Write one packet file per jurisdiction in a claimed batch."""
+    """Write one packet file per jurisdiction in a claimed batch.
+
+    The two passes get their own files: they have their own packet shapes,
+    and folding them into the geoid's tax packet emitted the wrong brief.
+    """
     os.makedirs(outdir, exist_ok=True)
     by_geoid = {}
+    passes = []
     for r in rows:
-        by_geoid.setdefault(r["geoid"], []).append(r["category"])
+        if r["category"] in (FRAMEWORK, ELECTIONS):
+            passes.append((r["geoid"], r["category"]))
+        else:
+            by_geoid.setdefault(r["geoid"], []).append(r["category"])
     paths = []
     for geoid, cats in by_geoid.items():
         path = os.path.join(outdir, "%s.md" % geoid)
         with open(path, "w") as fh:
             fh.write(build(conn, geoid, cats))
+        paths.append(path)
+    for geoid, cat in passes:
+        path = os.path.join(outdir, "%s-%s.md" % (geoid, cat))
+        with open(path, "w") as fh:
+            fh.write(build(conn, geoid, [cat]))
         paths.append(path)
     return paths

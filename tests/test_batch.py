@@ -263,14 +263,85 @@ class BatchTests(DbTest):
 
     def test_result_for_an_unknown_custom_id_is_ignored(self):
         row = self._submit_one()
+        self.conn.execute(
+            "INSERT INTO work_item (geoid, category, priority, status, updated_at) "
+            "VALUES (?,?,?,?,?)",
+            (self.geoid, "sales_use", 10, "awaiting_ai", db.now()))
+        self.conn.commit()
         results = [{"custom_id": "x-nope-nope-1",
                     "result": {"type": "succeeded",
                                "message": {"content": []}}}]
         with mock.patch.object(self.batch.httpx, "Client",
                                return_value=self._results_client(results)):
             got = self.batch.collect(self.conn, self._settings(), row)
-        self.assertEqual(got, {"landed": 0, "unknown": 1})
+        self.assertEqual(got, {"landed": 0, "unknown": 1, "orphaned": 1})
         self.assertEqual(self.batch.ready_depth(self.conn), 0)
+        # The submitted item never got a result. It must not sit at
+        # awaiting_ai forever: it fails visibly and the work item requeues.
+        item = self.conn.execute(
+            "SELECT status FROM extract_batch_item").fetchone()
+        self.assertEqual(item["status"], "failed")
+        wi = self.conn.execute(
+            "SELECT status FROM work_item WHERE geoid=? AND category=?",
+            (self.geoid, "sales_use")).fetchone()
+        self.assertEqual(wi["status"], "pending")
+
+    # ------------------------------------------------------ ambiguous submit
+    def test_ambiguous_submit_parks_unconfirmed_then_adopts(self):
+        """A submit that dies after the request may have been accepted.
+        Requeueing would post (and pay for) the batch twice; the items park
+        under an 'unconfirmed' batch and reconcile adopts the remote one."""
+        import httpx
+
+        self._park(2)
+
+        class _TimeoutClient(_Client):
+            def post(self, url, headers=None, json=None):
+                raise httpx.ReadTimeout("read timed out")
+
+        with mock.patch.object(self.batch.httpx, "Client",
+                               return_value=_TimeoutClient()):
+            with self.assertRaises(httpx.ReadTimeout):
+                self.batch.submit(self.conn, self._settings())
+
+        row = self.conn.execute("SELECT * FROM extract_batch").fetchone()
+        self.assertEqual(row["status"], "unconfirmed")
+        statuses = [r["status"] for r in self.conn.execute(
+            "SELECT status FROM extract_batch_item")]
+        self.assertEqual(statuses, ["submitted", "submitted"])
+
+        class _ListClient(_Client):
+            def get(self, url, params=None, headers=None):
+                return _Resp(200, {"data": [
+                    {"id": "b-lost", "request_counts": {"processing": 2}}]})
+
+        with mock.patch.object(self.batch.httpx, "Client",
+                               return_value=_ListClient()):
+            n = self.batch.reconcile_unconfirmed(self.conn, self._settings())
+        self.assertEqual(n, 1)
+        row = self.conn.execute("SELECT * FROM extract_batch").fetchone()
+        self.assertEqual(row["status"], "submitted")
+        self.assertEqual(row["remote_id"], "b-lost")
+
+    def test_connection_never_made_leaves_items_queued(self):
+        import httpx
+
+        self._park(2)
+
+        class _DeadClient(_Client):
+            def post(self, url, headers=None, json=None):
+                raise httpx.ConnectError("no route to host")
+
+        with mock.patch.object(self.batch.httpx, "Client",
+                               return_value=_DeadClient()):
+            with self.assertRaises(httpx.ConnectError):
+                self.batch.submit(self.conn, self._settings())
+
+        row = self.conn.execute("SELECT * FROM extract_batch").fetchone()
+        self.assertEqual(row["status"], "failed")
+        statuses = [r["status"] for r in self.conn.execute(
+            "SELECT status FROM extract_batch_item")]
+        self.assertEqual(statuses, ["queued", "queued"])
 
     # -------------------------------------------------------------------- tick
     def test_tick_holds_small_queues_then_sends_when_idle(self):

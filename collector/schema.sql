@@ -132,8 +132,11 @@ CREATE TABLE IF NOT EXISTS extract_batch (
     remote_id       TEXT UNIQUE,          -- the provider's batch id
     provider        TEXT NOT NULL,
     model           TEXT,
+    -- 'unconfirmed': the submit request died after it may have reached the
+    -- provider; batch.reconcile_unconfirmed adopts or requeues it.
     status          TEXT NOT NULL CHECK (status IN (
-                        'building','submitted','ended','collected','failed')),
+                        'building','submitted','ended','collected','failed',
+                        'unconfirmed')),
     n_items         INTEGER NOT NULL DEFAULT 0,
     n_succeeded     INTEGER NOT NULL DEFAULT 0,
     n_failed        INTEGER NOT NULL DEFAULT 0,

@@ -23,8 +23,8 @@ from urllib.parse import urlparse
 
 from . import coverage, db, ledger
 from .vocab import (
-    ELECTIONS, FRAMEWORK, SOURCE_TYPES, validate_finding, validate_grant,
-    validate_measure, validate_profile, validate_threshold,
+    ELECTIONS, FRAMEWORK, PASS_KINDS, SOURCE_TYPES, validate_finding,
+    validate_grant, validate_measure, validate_profile, validate_threshold,
 )
 
 # doc key -> (table, validator, label used in error messages)
@@ -97,12 +97,18 @@ def _rows_of(doc, key):
     return rows
 
 
-def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>"):
+def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>",
+             work_item=None):
     """Validate every section, then write the ones that pass.
 
     Returns counts. `written` is the total across all sections; `by_type`
     breaks it down. Errors name their section and index, so a rejection is
     traceable back to one row of one array.
+
+    work_item is the claimed (geoid, category) this document answers, when a
+    collector pass produced it. Without it, a county elections item whose
+    measures all belong to cities inside the county — exactly what the packet
+    asks for — never got its status updated and sat at in_progress forever.
     """
     present = [key for key, _, _ in SECTIONS if doc.get(key) is not None]
     if not present and doc.get("profile") is None:
@@ -141,15 +147,19 @@ def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>"):
 
     n_valid = sum(len(v) for v in ok.values()) + len(profiles)
 
+    # Dry run first: its whole point is reporting the valid/rejected split,
+    # which the strict exit below would otherwise pre-empt.
+    if dry_run:
+        by_type = {k: 0 for k, _, _ in SECTIONS}
+        by_type["profile"] = 0
+        return {"valid": n_valid, "rejected": len(errors), "written": 0,
+                "by_type": by_type, "errors": errors}
+
     if errors and not allow_partial:
         msg = "\n".join("  " + e for e in errors)
         raise SystemExit("%d row(s) rejected, nothing written:\n%s\n\n"
                          "Fix the file, or re-run with --allow-partial to load "
                          "the %d valid rows." % (len(errors), msg, n_valid))
-
-    if dry_run:
-        return {"valid": n_valid, "rejected": len(errors), "written": 0,
-                "by_type": {k: 0 for k, _, _ in SECTIONS}, "errors": errors}
 
     ctx = _Ctx(conn, researcher, retrieved_at, method)
     # Order matters: thresholds land before measures so a document that
@@ -160,6 +170,9 @@ def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>"):
     by_type["grants"] = _write_grants(ctx, ok["grants"])
     by_type["measures"] = _write_measures(ctx, ok["measures"])
     by_type["findings"] = _write_findings(ctx, ok["findings"])
+
+    if work_item and all(work_item) and sum(by_type.values()):
+        ctx.touched.add(tuple(work_item))
 
     for geoid, cat in ctx.touched:
         _touch_work_item(conn, geoid, cat)
@@ -391,7 +404,17 @@ def _write_measures(ctx, rows):
             claim_id = cur.lastrowid
         ctx.cite("ballot_measure", claim_id, m, source_id)
         written += 1
-        ctx.touched.add((m["geoid"], ELECTIONS))
+        # Only ledger geoids that can legitimately hold an elections item:
+        # counties (where the pass runs) or anything already on the work
+        # list. A city measure found under a county's elections pass must not
+        # mint a place-level elections item that PASS_KINDS says cannot exist.
+        j = conn.execute("SELECT kind FROM jurisdiction WHERE geoid=?",
+                         (m["geoid"],)).fetchone()
+        has_item = conn.execute(
+            "SELECT 1 FROM work_item WHERE geoid=? AND category=?",
+            (m["geoid"], ELECTIONS)).fetchone()
+        if has_item or (j and j["kind"] in PASS_KINDS[ELECTIONS]):
+            ctx.touched.add((m["geoid"], ELECTIONS))
         ctx.measured.add(m["geoid"])
 
     # Holding measures for a place without saying how complete they are is the
@@ -405,7 +428,7 @@ def _write_measures(ctx, rows):
             measures_found=len([m for m in rows if m.get("geoid") == geoid]),
             basis="Loaded from research. Coverage is partial until a full "
                   "canvass series is confirmed for this scope.",
-            asserted_by=ctx.researcher)
+            asserted_by=ctx.researcher, commit=False)
     return written
 
 
@@ -587,6 +610,12 @@ def _write_profiles(ctx, rows):
             % ", ".join("%s=?" % k for k in fields),
             list(fields.values()) + [db.now(), ctx.researcher, usps])
         written += 1
+        # Profiles are framework work. Without this, a framework document
+        # carrying only a profile left the state's item at in_progress until
+        # the stale sweep paid for the whole crawl and extraction again.
+        scope = _state_geoid(conn, usps)
+        if scope:
+            ctx.touched.add((scope, FRAMEWORK))
     return written
 
 
@@ -635,10 +664,29 @@ def verify(conn):
         "SELECT t.geoid, t.instrument_code FROM tax_instrument t JOIN source s "
         "ON s.id=t.source_id WHERE t.superseded_by IS NULL AND s.authority_tier=4")
 
+    # Tax categories only: framework and elections passes never write
+    # tax_instrument rows, so including them flagged every completed pass and
+    # made a --strict verify fail forever once those passes ran.
     add("marked complete but holding no findings",
         "SELECT w.geoid, w.category FROM work_item w WHERE w.status='complete' "
+        "AND w.category NOT IN ('framework','elections') "
         "AND NOT EXISTS (SELECT 1 FROM tax_instrument t WHERE t.geoid=w.geoid "
         "AND t.category=w.category AND t.superseded_by IS NULL)")
+
+    add("framework marked complete but holding no rules",
+        "SELECT w.geoid, w.category FROM work_item w "
+        "JOIN jurisdiction j ON j.geoid = w.geoid "
+        "WHERE w.status='complete' AND w.category='framework' "
+        "AND NOT EXISTS (SELECT 1 FROM threshold_rule r WHERE r.state_usps=j.state_usps) "
+        "AND NOT EXISTS (SELECT 1 FROM authority_grant g WHERE g.state_usps=j.state_usps) "
+        "AND NOT EXISTS (SELECT 1 FROM state_profile p WHERE p.state_usps=j.state_usps)")
+
+    add("elections marked complete with no measures and no coverage assertion",
+        "SELECT w.geoid, w.category FROM work_item w "
+        "WHERE w.status='complete' AND w.category='elections' "
+        "AND NOT EXISTS (SELECT 1 FROM ballot_measure b WHERE b.geoid=w.geoid) "
+        "AND NOT EXISTS (SELECT 1 FROM coverage_assertion c "
+        "  WHERE c.domain='ballot_measure' AND c.scope_geoid=w.geoid)")
 
     add("stale: retrieved more than 400 days ago",
         "SELECT geoid, instrument_code, retrieved_at FROM tax_instrument "
@@ -735,8 +783,12 @@ def verify(conn):
     for r in qrows:
         path = r["store_path"]
         if path not in blob_cache:
-            blob_cache[path] = _archive_text(path)
-        if r["source_quote"] not in blob_cache[path]:
+            # Whitespace-insensitive: PDF and HTML extraction mangle line
+            # breaks and runs of spaces often enough that an exact match
+            # flags correct quotes.
+            blob_cache[path] = re.sub(r"\s+", " ", _archive_text(path))
+        quote = re.sub(r"\s+", " ", r["source_quote"]).strip()
+        if quote and quote not in blob_cache[path]:
             missing_quote.append((r["id"], r["geoid"]))
     checks.append(("source_quote not found in archived bytes",
                    len(missing_quote), missing_quote[:8]))
@@ -759,4 +811,10 @@ def _archive_text(path, limit=2_000_000):
                 blob = z.read(names[0])[:limit]
         except Exception:
             return ""
-    return blob.decode("latin-1", errors="replace")
+    # UTF-8 first: government pages are overwhelmingly UTF-8, and a latin-1
+    # decode turns §, curly quotes and dashes into mojibake — which made the
+    # quote check permanently flag exactly the statute language it protects.
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return blob.decode("latin-1", errors="replace")

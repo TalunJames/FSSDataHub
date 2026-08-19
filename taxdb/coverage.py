@@ -81,7 +81,7 @@ def assert_scope(conn, domain, scope_geoid, scope_type="county", completeness="p
                  basis="", asserted_by="collector", jurisdiction_kind=None,
                  period_start="1990-01-01", period_end="2099-12-31",
                  measures_found=None, known_exclusions=None, source_id=None,
-                 only_if_absent=False):
+                 only_if_absent=False, commit=True):
     """Upsert one coverage assertion.
 
     Called whenever a research pass finishes a scope, including when it finds
@@ -113,7 +113,10 @@ def assert_scope(conn, domain, scope_geoid, scope_type="county", completeness="p
         (completeness, basis, known_exclusions, measures_found, source_id,
          asserted_by, db.now(), domain, scope_type, scope_geoid,
          jurisdiction_kind, period_start, period_end))
-    conn.commit()
+    # commit=False lets a caller mid-transaction (ingest.load_doc) keep its
+    # writes atomic; committing here would persist a half-loaded document.
+    if commit:
+        conn.commit()
     return True
 
 
