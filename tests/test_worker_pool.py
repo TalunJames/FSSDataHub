@@ -138,6 +138,46 @@ class WorkerPoolTests(DbTest):
         self.assertEqual(run["status"], "stopped")
         self.assertFalse(self.worker._cancel.is_set(), "cancel flag was not cleared")
 
+    def test_a_stalled_worker_is_abandoned(self):
+        """One wedged crawl froze the pool, the run, and every batch tick
+        behind it for nine hours overnight. The pool now stops waiting."""
+        self.store.put_many(self.conn, {"item_stall_minutes": "0.01"})
+        self.conn.commit()
+        release = threading.Event()
+
+        def process(conn, client, s, run_id, row, slot=0):
+            if row["geoid"].endswith("20000"):
+                release.wait(30)      # far past the stall ceiling
+            return 1, 0
+
+        t0 = time.monotonic()
+        try:
+            self._batch(process)
+            elapsed = time.monotonic() - t0
+            # Read before releasing: the abandoned thread's late bump_run is
+            # harmless in production but would shift the counts asserted here.
+            run = self.conn.execute(
+                "SELECT status, message, items_claimed FROM crawl_run "
+                "ORDER BY id DESC LIMIT 1").fetchone()
+        finally:
+            release.set()             # let the abandoned daemon thread go
+        self.assertLess(elapsed, 20, "the pool waited on the wedged worker")
+        self.assertEqual(run["status"], "ok")
+        self.assertIn("stalled", run["message"])
+        # The other eleven items were still researched.
+        self.assertEqual(run["items_claimed"], 11)
+        # No ghost worker lingers in the snapshot.
+        self.assertEqual(self.worker.snapshot()["workers"], [])
+
+    def test_restart_closes_orphaned_runs(self):
+        run_id = self.store.start_run(self.conn, "continuous", provider="none")
+        self.worker._close_orphaned_runs(self.conn)
+        row = self.conn.execute(
+            "SELECT * FROM crawl_run WHERE id=?", (run_id,)).fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("restarted", row["message"])
+        self.assertTrue(row["finished_at"])
+
     def test_snapshot_reports_each_worker(self):
         seen_counts, lock = [], threading.Lock()
 

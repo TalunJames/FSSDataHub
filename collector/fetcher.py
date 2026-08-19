@@ -20,6 +20,7 @@ import asyncio
 import functools
 import logging
 import os
+import re
 import threading
 import uuid
 from datetime import timedelta
@@ -34,6 +35,10 @@ log = logging.getLogger("collector.fetcher")
 # Set once, when a browser pass proves impossible in this container (usually
 # `playwright install chromium` was never run). Avoids retrying per item.
 _browser_broken = False
+
+# One request handler gets this long before Crawlee abandons it. Also feeds
+# the round ceiling in _round_deadline, so the two stay in step.
+HANDLER_TIMEOUT = 120
 
 
 class Unavailable(Exception):
@@ -228,13 +233,70 @@ def _crawler_kwargs(plan, budget):
             max_concurrency=plan["concurrency"],
             max_tasks_per_minute=plan["rate"],
         ),
-        "request_handler_timeout": timedelta(seconds=120),
+        "request_handler_timeout": timedelta(seconds=HANDLER_TIMEOUT),
         "configuration": Configuration(
             storage_dir=storage_dir(),
             purge_on_start=True,
         ),
         "configure_logging": False,
     }
+
+
+def _round_deadline(plan, budget):
+    """The longest one round can honestly take, from the knobs that bound it.
+
+    Every request gets at most `retries + 1` attempts of HANDLER_TIMEOUT
+    each, requests run `concurrency` at a time, and the rate cap can stretch
+    a round further than the timeouts alone would. Anything past the larger
+    of those two, plus slack, is not a slow government server — it is a
+    crawler that will never come back.
+    """
+    attempts = plan["retries"] + 1
+    waves = -(-budget // plan["concurrency"])  # ceil
+    ceiling = float(HANDLER_TIMEOUT * attempts * waves)
+    if plan["rate"] != float("inf"):
+        ceiling = max(ceiling, 60.0 * budget * attempts / plan["rate"])
+    return ceiling + 300.0
+
+
+async def _run_capped(crawler, requests, seconds, label, geoid, category):
+    """Run one crawler round under a hard ceiling. True if it finished itself.
+
+    crawler.run() has been observed to never return: an overnight render
+    round finished 4/4 pages in 28 seconds, then idled for nine hours —
+    freezing its worker thread, the run, and every batch tick behind it.
+    The ceiling turns that failure mode into one lost round.
+    """
+    task = asyncio.ensure_future(crawler.run(requests))
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if done:
+        task.result()  # a round that failed outright still raises as before
+        return True
+    log.warning("%s round for %s/%s still running after %ds; abandoning it",
+                label, geoid, category, int(seconds))
+    try:
+        crawler.stop()
+    except Exception:
+        pass
+    done, _ = await asyncio.wait({task}, timeout=60)
+    if not done:
+        task.cancel()
+        # Give the cancellation a moment to land; if it does not, asyncio.run
+        # retires the task on loop close and the worker-pool stall watchdog
+        # is the backstop for a task that ignores even that.
+        await asyncio.wait({task}, timeout=60)
+    if task.done() and not task.cancelled():
+        task.exception()  # collect it, or asyncio logs "never retrieved"
+    return False
+
+
+def _blocked_status(error):
+    """The HTTP status behind a Crawlee 'session is blocked' failure, or None."""
+    text = str(error)
+    if type(error).__name__ != "SessionError" and "session is blocked" not in text:
+        return None
+    m = re.search(r"status code (\d{3})", text)
+    return int(m.group(1)) if m else None
 
 
 def _http_client(plan):
@@ -319,11 +381,19 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
     async def failed(context, error):
         page = crawl.error_page(context.request.url, str(error)[:400])
         _keep(conn, run_id, geoid, category, page, ctx, plan, archive=False)
+        # A 401/403 here is bot protection answering an HTTP client, not the
+        # site refusing the public record: mass.gov and census.gov blocked a
+        # whole night's fetches this way while serving every browser that
+        # asked. Queue the page for the render round, where a real browser
+        # asks. 429 is excluded — that one means stop asking.
+        if plan["render"] and _blocked_status(error) in (401, 403):
+            ctx["thin"].append(context.request.url)
 
     try:
-        await crawler.run([
-            Request.from_url(u, user_data={"depth": 0}) for u in urls
-        ])
+        await _run_capped(
+            crawler,
+            [Request.from_url(u, user_data={"depth": 0}) for u in urls],
+            _round_deadline(plan, budget), "http", geoid, category)
     finally:
         try:
             await rq.drop()
@@ -332,7 +402,7 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
 
 
 async def _render_round(conn, plan, run_id, geoid, category, ctx):
-    """Re-fetch thin HTML pages in a real browser and keep what renders."""
+    """Re-fetch thin or bot-blocked pages in a real browser; keep what renders."""
     global _browser_broken
     from crawlee.crawlers import PlaywrightCrawler
 
@@ -375,7 +445,12 @@ async def _render_round(conn, plan, run_id, geoid, category, ctx):
         log.info("render failed for %s: %s", context.request.url, error)
 
     try:
-        await crawler.run(urls)
+        # A round that times out does NOT mark the browser broken: the pages
+        # it did render are kept, and the hang seen in the wild was a one-off
+        # stall after all pages finished, not a broken install.
+        await _run_capped(crawler, urls,
+                          _round_deadline(plan, len(urls)), "render",
+                          geoid, category)
     except Exception as exc:
         _browser_broken = True
         log.warning("browser pass failed, staying with HTTP text: %s", exc)

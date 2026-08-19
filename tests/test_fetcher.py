@@ -12,6 +12,7 @@ the real Crawlee API; that is what `collector/README.md` and a run on the NAS
 are for.
 """
 
+import asyncio
 import sys
 import types
 import unittest
@@ -55,12 +56,16 @@ class _Context:
         self._queue.extend(requests)
 
 
+_SessionError = type("SessionError", (Exception,), {})
+
+
 class _FakeCrawler:
     """Drives handlers over `pages`, a url -> (status, ctype, blob) map."""
 
     pages = {}
     robots_blocked = set()
     broken = set()
+    blocked = {}       # url -> HTTP status behind a "session is blocked" fail
     started = []
 
     def __init__(self, **kwargs):
@@ -110,6 +115,14 @@ class _FakeCrawler:
                 if self.failed_cb:
                     await self.failed_cb(_Context(req, None, queue),
                                          RuntimeError("connection reset"))
+                continue
+            if req.url in type(self).blocked:
+                if self.failed_cb:
+                    await self.failed_cb(
+                        _Context(req, None, queue),
+                        _SessionError(
+                            "Assuming the session is blocked based on HTTP "
+                            "status code %d" % type(self).blocked[req.url]))
                 continue
             spec = type(self).pages.get(req.url)
             if spec is None:
@@ -263,7 +276,9 @@ class FetcherTests(DbTest):
         _FakeCrawler.pages = {}
         _FakeCrawler.robots_blocked = set()
         _FakeCrawler.broken = set()
+        _FakeCrawler.blocked = {}
         _FakeCrawler.started = []
+        _FakePlaywrightCrawler.rendered = {}
         self.fetcher._browser_broken = False
         # No live search or web calls from these tests.
         self._real_search = crawl.search_web
@@ -501,6 +516,83 @@ class FetcherTests(DbTest):
         self.assertEqual(len(pages), 1)
         self.assertFalse(any(p.get("rendered") for p in pages))
 
+    def test_bot_blocked_page_rescued_by_the_browser(self):
+        """mass.gov answered a whole night of honest HTTP fetches with 403
+        while serving every real browser that asked. A blocked page goes to
+        the render round, where a real browser does the asking."""
+        url = "https://franklincountyohio.gov/"
+        _FakeCrawler.blocked = {url: 403}
+        _FakePlaywrightCrawler.rendered = {url: RENDERED_APP.decode("utf-8")}
+        self.seed(url)
+        pages, text = self.crawl_item(
+            self.settings(browser_render="1", max_pages_per_item="1"))
+        self.assertIn("3.0 percent", text)
+        self.assertTrue(any(p.get("rendered") for p in pages))
+        # The HTTP block itself stays on the record.
+        self.assertTrue(any("blocked" in (p.get("error") or "") for p in pages))
+
+    def test_blocked_page_left_alone_when_render_is_off(self):
+        url = "https://franklincountyohio.gov/"
+        _FakeCrawler.blocked = {url: 403}
+        _FakePlaywrightCrawler.rendered = {url: RENDERED_APP.decode("utf-8")}
+        self.seed(url)
+        pages, text = self.crawl_item(self.settings(max_pages_per_item="1"))
+        self.assertEqual(text, "")
+        self.assertFalse(any(p.get("rendered") for p in pages))
+
+    def test_rate_limited_page_not_retried_in_the_browser(self):
+        """429 means stop asking; re-asking with Chromium is not politeness."""
+        url = "https://franklincountyohio.gov/"
+        _FakeCrawler.blocked = {url: 429}
+        _FakePlaywrightCrawler.rendered = {url: RENDERED_APP.decode("utf-8")}
+        self.seed(url)
+        pages, text = self.crawl_item(
+            self.settings(browser_render="1", max_pages_per_item="1"))
+        self.assertEqual(text, "")
+        self.assertFalse(any(p.get("rendered") for p in pages))
+
+    def test_blocked_status_parsing(self):
+        f = self.fetcher._blocked_status
+        self.assertEqual(f(_SessionError(
+            "Assuming the session is blocked based on HTTP status code 403")), 403)
+        # Resilient to the error arriving pre-stringified under another type.
+        self.assertEqual(f(RuntimeError(
+            "Assuming the session is blocked based on HTTP status code 429")), 429)
+        self.assertIsNone(f(RuntimeError("connection reset")))
+
+    def test_a_round_that_never_returns_is_abandoned(self):
+        """crawler.run() has idled forever after finishing every page; the
+        ceiling turns that into one lost round instead of a lost night."""
+        url = "https://franklincountyohio.gov/treasurer"
+        _FakeCrawler.pages = {url: (200, "text/html", TREASURER)}
+
+        class _StallingCrawler(_FakeCrawler):
+            stops = []
+
+            async def run(self, requests):
+                await super().run(requests)
+                self._hang = asyncio.Event()
+                await self._hang.wait()
+
+            def stop(self):
+                type(self).stops.append(True)
+                self._hang.set()
+
+        crawlers = sys.modules["crawlee.crawlers"]
+        crawlers.HttpCrawler = _StallingCrawler
+        real_deadline = self.fetcher._round_deadline
+        self.fetcher._round_deadline = lambda plan, budget: 0.2
+        try:
+            self.seed(url)
+            pages, text = self.crawl_item(self.settings())
+        finally:
+            self.fetcher._round_deadline = real_deadline
+            crawlers.HttpCrawler = _FakeCrawler
+        self.assertTrue(_StallingCrawler.stops, "the stuck round was not stopped")
+        # Everything fetched before the stall is kept.
+        self.assertEqual(len(pages), 1)
+        self.assertIn("transient occupancy", text)
+
     def test_engine_options_carry_the_policy(self):
         _FakeCrawler.pages = {
             "https://franklincountyohio.gov/": (200, "text/html", COUNTY_HOME),
@@ -610,7 +702,9 @@ class BothEnginesReportSearchTests(DbTest):
         _FakeCrawler.pages = {}
         _FakeCrawler.robots_blocked = set()
         _FakeCrawler.broken = set()
+        _FakeCrawler.blocked = {}
         _FakeCrawler.started = []
+        _FakePlaywrightCrawler.rendered = {}
         self._real_ddg = crawl._ddg_search
         self._real_bing = crawl._bing_search
         self._real_seeds = crawl.seeds_for
