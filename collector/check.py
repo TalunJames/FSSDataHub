@@ -349,6 +349,7 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
     # is to be skeptical, and a checker that rubber-stamps is worse than none.
     raw, err = extract.chat(settings, prompt, system=system or CHECK_SYSTEM,
                             images=images, model=model,
+                            provider=checker_provider(settings),
                             effort=extract.DEFAULT_CHECKER_EFFORT)
     if err:
         return [], err
@@ -367,9 +368,20 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
     return out, None
 
 
+def checker_provider(settings):
+    """The provider the second pass runs on.
+
+    An empty checker_provider means "same as the extractor" — the pre-split
+    behavior. The default is the local llama model: checking matters less
+    than extracting, and a free second opinion is still a second opinion.
+    """
+    own = (settings.get("checker_provider") or "").strip().lower()
+    return own or (settings.get("provider") or "none").strip().lower()
+
+
 def checker_model_name(settings):
     return ((settings.get("checker_model") or "").strip()
-            or extract.default_model(settings))
+            or extract.default_model(settings, checker_provider(settings)))
 
 
 def record(conn, run_id, geoid, category, verdict, flags, settings):
@@ -378,7 +390,7 @@ def record(conn, run_id, geoid, category, verdict, flags, settings):
         "provider, model, created_at) VALUES (?,?,?,?,?,?,?,?)",
         (run_id, geoid, category, verdict,
          json.dumps(flags) if flags else None,
-         settings.get("provider"), checker_model_name(settings), db.now()))
+         checker_provider(settings), checker_model_name(settings), db.now()))
 
 
 def summarize(flags, limit=3):
@@ -450,7 +462,7 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
 
     err = None
     ai = []
-    if (settings.get("provider") or "none") != "none":
+    if checker_provider(settings) != "none":
         ai, err = ai_flags(settings, jurisdiction, category, rows,
                            doc_text, images=images, system=system,
                            concerns=soft)

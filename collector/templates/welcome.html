@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Welcome · FSS Data Hub</title>
+  <link rel="stylesheet" href="/static/broadsheet.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .welcome { max-width: 680px; margin: 0 auto; padding: 56px 24px 120px;
+               animation: rise .25s ease both; }
+    .welcome .mast { display: flex; align-items: baseline; gap: 14px; }
+    .welcome .mast .brand { font-size: 15px; }
+    .welcome .vpill { font-size: 12px; letter-spacing: .06em; padding: 3px 10px;
+                      border: 1px solid var(--color-divider); border-radius: 999px;
+                      opacity: .7; white-space: nowrap; }
+    .welcome h1 { margin: 26px 0 0; }
+    .welcome .news { margin: 30px 0 0; display: flex; flex-direction: column; gap: 16px; }
+    .welcome .news article { border-left: 3px solid var(--color-accent);
+                             padding: 2px 0 2px 16px; }
+    .welcome .news h3 { margin: 0 0 3px; font-size: 15px; }
+    .welcome .news p { margin: 0; font-size: 14px; opacity: .7; line-height: 1.5;
+                       text-wrap: pretty; }
+    .welcome .status { font-size: 13px; margin: 8px 0 0; }
+    .welcome .status.ok { color: var(--color-accent-700); }
+    .welcome .actions { margin: 48px 0 0; display: flex; gap: 14px; align-items: center;
+                        flex-wrap: wrap; border-top: 1px solid var(--color-divider);
+                        padding-top: 26px; }
+    .welcome .actions .later { margin-left: auto; display: flex; gap: 16px;
+                               align-items: center; }
+    .welcome .actions a { font-size: 14px; }
+    .welcome label { display: block; font-size: 14px; margin: 14px 0 0; }
+    .welcome label input, .welcome label select { display: block; width: 100%;
+                                                  margin-top: 5px; }
+  </style>
+</head>
+<body>
+  <div class="welcome">
+    <div class="mast">
+      <span class="brand">FSS Data Hub</span>
+      <span class="vpill">updated to v{{ version }}</span>
+    </div>
+
+    <h1 class="page-title">Here's what changed</h1>
+    <p class="lede">A new version is running. Two minutes here and it goes back to work.</p>
+
+    <div class="news">
+      {% for title, detail in whats_new %}
+      <article>
+        <h3>{{ title }}</h3>
+        <p>{{ detail }}</p>
+      </article>
+      {% endfor %}
+    </div>
+
+    <form id="welcome-form" class="setup">
+
+      <section>
+        <h2>1 · Who reads the documents</h2>
+        <p class="why">The AI that opens each page and pulls the rates out. Paid APIs read best.</p>
+        <label>Reader
+          <select name="provider">
+            <option value="anthropic" {% if settings.provider=='anthropic' %}selected{% endif %}>Claude (recommended)</option>
+            <option value="llama" {% if settings.provider=='llama' %}selected{% endif %}>The NAS's own model (free, less accurate)</option>
+            <option value="openai" {% if settings.provider=='openai' %}selected{% endif %}>An OpenAI-compatible service</option>
+            <option value="none" {% if settings.provider=='none' or not settings.provider %}selected{% endif %}>Nobody, just archive pages</option>
+          </select>
+        </label>
+        <div class="keyrow" data-provider-block="anthropic">
+          <div class="field">
+            <label>Claude API key
+              <input name="anthropic_api_key" type="password"
+                     value="{{ settings.anthropic_api_key }}" autocomplete="off"></label>
+          </div>
+          <button type="button" class="btn btn-secondary" data-test="reader">Test it</button>
+        </div>
+        <div class="keyrow" data-provider-block="openai">
+          <div class="field">
+            <label>API key
+              <input name="openai_api_key" type="password"
+                     value="{{ settings.openai_api_key }}" autocomplete="off"></label>
+          </div>
+          <button type="button" class="btn btn-secondary" data-test="reader">Test it</button>
+        </div>
+        <div class="keyrow" data-provider-block="llama">
+          <div class="field">
+            <label>Where the model runs
+              <input name="llama_base_url" value="{{ settings.llama_base_url }}"></label>
+          </div>
+          <button type="button" class="btn btn-secondary" data-test="reader">Test it</button>
+        </div>
+        {% if reader_status[0] %}
+        <p class="status ok">✓ {{ reader_status[1] }}</p>
+        {% else %}
+        <p class="status bad">{{ reader_status[1] }}</p>
+        {% endif %}
+        <p class="result" id="reader-result"></p>
+      </section>
+
+      <section>
+        <h2>2 · Where the double-check runs <span class="pill">new</span></h2>
+        <p class="why">A second AI re-reads every answer before it enters the database.
+          It now runs on your local model by default, so the second opinion is free.
+          If it can't be reached, findings wait for you on Review instead of being trusted.</p>
+        <label>Double-check with
+          <select name="checker_provider">
+            <option value="llama" {% if settings.checker_provider=='llama' %}selected{% endif %}>The NAS's own model (free, recommended)</option>
+            <option value="" {% if settings.checker_provider=='' %}selected{% endif %}>Same AI as the reader</option>
+            <option value="anthropic" {% if settings.checker_provider=='anthropic' %}selected{% endif %}>Claude</option>
+            <option value="openai" {% if settings.checker_provider=='openai' %}selected{% endif %}>An OpenAI-compatible service</option>
+          </select>
+        </label>
+        <div data-checker-block="llama">
+          <div class="grid2">
+            <label>Where the model runs
+              <input name="llama_base_url_checker" value="{{ settings.llama_base_url }}"
+                     placeholder="http://host.docker.internal:11434"></label>
+            <label>Which model
+              <select name="llama_model">
+                {% for m in llama_models %}
+                <option value="{{ m }}" {% if settings.llama_model==m %}selected{% endif %}>{{ m }}{% if m=='llama3.1' %} — lighter{% elif m=='gpt-oss:20b' %} — smarter, needs more memory{% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <p class="hint" style="margin-top:8px">On TrueNAS, use the Ollama app's IP, or
+            <code>host.docker.internal:11434</code> if Ollama runs on the host.
+            <code>gpt-oss:20b</code> judges better if the NAS has the memory for it.
+            Whichever you pick must be pulled in Ollama first
+            (<code>ollama pull gpt-oss:20b</code>), then hit Test.</p>
+        </div>
+        <div class="keyrow">
+          <button type="button" class="btn btn-secondary" data-test="checker">Test the double-check</button>
+        </div>
+        <p class="result" id="checker-result"></p>
+      </section>
+
+      <section>
+        <h2>3 · Web search key <span class="dim" style="font-size:14px">optional</span></h2>
+        <p class="why">With a free Brave Search key the crawler finds official sites reliably.
+          Without one it scrapes result pages, which get throttled, so collection runs slower.</p>
+        <div class="keyrow">
+          <div class="field">
+            <label>Brave Search API key
+              <input name="search_api_key" type="password"
+                     value="{{ settings.search_api_key }}" autocomplete="off"></label>
+          </div>
+        </div>
+        {% if settings.search_api_key_set %}
+        <p class="status ok">✓ Already set up from before.</p>
+        {% endif %}
+      </section>
+
+      <div class="actions">
+        <button class="btn btn-primary" type="submit">Save and continue</button>
+        <div class="later">
+          <a href="#" id="open-settings">All settings</a>
+          <a href="#" id="skip">Skip for now</a>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <div id="toast" hidden></div>
+
+  <script>
+  (function () {
+    function toast(msg, ok) {
+      var el = document.getElementById("toast");
+      el.hidden = false;
+      el.textContent = msg;
+      el.classList.toggle("bad", ok === false);
+      clearTimeout(toast._t);
+      toast._t = setTimeout(function () { el.hidden = true; }, 4200);
+    }
+
+    async function api(path, body) {
+      var res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      var data;
+      try { data = await res.json(); } catch (e) { data = {}; }
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      return data;
+    }
+
+    var form = document.getElementById("welcome-form");
+
+    function values() {
+      var data = {};
+      for (var i = 0; i < form.elements.length; i++) {
+        var el = form.elements[i];
+        if (el.name) data[el.name] = el.value;
+      }
+      // The checker section edits the same llama endpoint the reader would
+      // use; the visible copy wins so what was tested is what is saved.
+      var checkerBlock = document.querySelector("[data-checker-block]");
+      if (checkerBlock && checkerBlock.style.display !== "none") {
+        data.llama_base_url = data.llama_base_url_checker || data.llama_base_url;
+      }
+      delete data.llama_base_url_checker;
+      return data;
+    }
+
+    function showBlocks() {
+      var reader = form.elements.provider.value;
+      document.querySelectorAll("[data-provider-block]").forEach(function (el) {
+        el.style.display = el.dataset.providerBlock === reader ? "" : "none";
+      });
+      var checker = form.elements.checker_provider.value;
+      document.querySelectorAll("[data-checker-block]").forEach(function (el) {
+        el.style.display = el.dataset.checkerBlock === checker ? "" : "none";
+      });
+    }
+    form.elements.provider.addEventListener("change", showBlocks);
+    form.elements.checker_provider.addEventListener("change", showBlocks);
+    showBlocks();
+
+    // The reader and checker sections can both show the llama endpoint;
+    // mirror them so they behave as one field however the user gets there.
+    var urlA = form.elements.llama_base_url;
+    var urlB = form.elements.llama_base_url_checker;
+    urlA.addEventListener("input", function () { urlB.value = urlA.value; });
+    urlB.addEventListener("input", function () { urlA.value = urlB.value; });
+
+    async function test(kind) {
+      var out = document.getElementById(kind + "-result");
+      out.textContent = "Testing…";
+      try {
+        await api("/api/settings", values());
+        var r = await api(kind === "reader" ? "/api/provider/test"
+                                            : "/api/checker/test");
+        out.textContent = r.ok
+          ? "✓ " + r.provider + " (" + r.model + ") answered: " + r.response
+          : "✗ " + (r.error || "test failed");
+        toast(r.ok ? "It works." : (r.error || "Test failed"), r.ok);
+      } catch (e) {
+        out.textContent = "✗ " + e.message;
+        toast(e.message, false);
+      }
+    }
+    document.querySelectorAll("[data-test]").forEach(function (btn) {
+      btn.addEventListener("click", function () { test(btn.dataset.test); });
+    });
+
+    async function finish(saveFirst, dest) {
+      try {
+        if (saveFirst) await api("/api/settings", values());
+        await api("/api/setup/complete");
+        location.href = dest;
+      } catch (e) { toast(e.message, false); }
+    }
+
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      finish(true, "/");
+    });
+    document.getElementById("skip").addEventListener("click", function (ev) {
+      ev.preventDefault();
+      finish(false, "/");
+    });
+    document.getElementById("open-settings").addEventListener("click", function (ev) {
+      ev.preventDefault();
+      finish(true, "/settings");
+    });
+  })();
+  </script>
+</body>
+</html>

@@ -144,16 +144,34 @@
           </fieldset>
           <fieldset>
             <legend>Local Llama / Ollama</legend>
-            <label>Model <input name="llama_model" value="{{ settings.llama_model }}"></label>
+            <label>Model
+              <input name="llama_model" value="{{ settings.llama_model }}" list="llama-models">
+              <datalist id="llama-models">
+                {% for m in llama_models %}<option value="{{ m }}">{% endfor %}
+              </datalist>
+            </label>
             <label>API key <span class="dim">optional</span>
               <input name="llama_api_key" type="password" value="{{ settings.llama_api_key }}" autocomplete="off"></label>
-            <p class="hint">On TrueNAS, use the Ollama app's IP or <code>host.docker.internal:11434</code> if Ollama runs on the host.</p>
+            <p class="hint">On TrueNAS, use the Ollama app's IP or <code>host.docker.internal:11434</code> if Ollama runs on the host. <code>gpt-oss:20b</code> judges better than <code>llama3.1</code> if the box has the memory; pull the model in Ollama before pointing at it.</p>
           </fieldset>
           <fieldset>
             <legend>Second checker</legend>
-            <label>Checker model <span class="dim">empty = same as the extractor</span>
-              <input name="checker_model" value="{{ settings.checker_model }}" list="anthropic-models"></label>
-            <p class="hint">With Anthropic, <code>claude-haiku-4-5</code> keeps checking cheap. If the checker cannot run, everything goes to human review — it never fails toward trust.</p>
+            <label>Runs on
+              <select name="checker_provider">
+                <option value="llama" {% if settings.checker_provider=='llama' %}selected{% endif %}>The NAS's own model (free)</option>
+                <option value="" {% if settings.checker_provider=='' %}selected{% endif %}>Same as the extractor</option>
+                <option value="anthropic" {% if settings.checker_provider=='anthropic' %}selected{% endif %}>Anthropic</option>
+                <option value="openai" {% if settings.checker_provider=='openai' %}selected{% endif %}>OpenAI-compatible</option>
+              </select>
+            </label>
+            <label>Checker model <span class="dim">empty = that provider's default</span>
+              <input name="checker_model" value="{{ settings.checker_model }}" list="checker-models">
+              <datalist id="checker-models">
+                {% for m in llama_models %}<option value="{{ m }}">{% endfor %}
+                {% for m in anthropic_models %}<option value="{{ m }}">{% endfor %}
+              </datalist>
+            </label>
+            <p class="hint">The double-check runs on the local model by default: it matters less than the extraction, and a free second opinion is still a second opinion. On Anthropic, <code>claude-haiku-4-5</code> keeps checking cheap. If the checker cannot run, everything goes to human review — it never fails toward trust.</p>
           </fieldset>
         </div>
       </section>

@@ -20,15 +20,19 @@ from taxdb.vocab import (
     WORK_STATUSES,
 )
 
-from . import autopilot, crawl, extract, intake, interview, present, store, worker
+from . import (
+    __version__, autopilot, check, crawl, extract, intake, interview, present,
+    store, worker,
+)
 from .settings import (
-    ANTHROPIC_MODELS, VALID_KINDS, VALID_PROVIDERS, VALID_SCHEDULE, VALID_SEARCH,
+    ANTHROPIC_MODELS, LLAMA_MODELS, VALID_CHECKER_PROVIDERS, VALID_KINDS,
+    VALID_PROVIDERS, VALID_SCHEDULE, VALID_SEARCH, WHATS_NEW,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
 
-app = FastAPI(title="Tax Database Collector", version="0.4.0")
+app = FastAPI(title="Tax Database Collector", version=__version__)
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
 
 security = HTTPBasic(auto_error=False)
@@ -62,6 +66,40 @@ class NoCacheHTML(BaseHTTPMiddleware):
 
 
 app.add_middleware(NoCacheHTML)
+
+# Pages that bounce to the welcome screen after an update. /settings and
+# /welcome stay out so there is always a way in even if the wizard breaks.
+SETUP_GATED = {"/", "/review", "/record", "/data", "/queue", "/runs", "/manual"}
+
+
+def setup_pending(conn):
+    """True until this version's welcome screen has been acknowledged."""
+    return store.get(conn, "setup_seen_version", "") != __version__
+
+
+class WelcomeOnUpdate(BaseHTTPMiddleware):
+    """One detour per update: land on /welcome until it is acknowledged.
+
+    Checked per page view rather than cached, because Finish/Skip stamps the
+    version from a different request and the very next load must see it.
+    """
+    async def dispatch(self, request, call_next):
+        if request.method == "GET" and request.url.path in SETUP_GATED:
+            pending = await run_in_threadpool(_setup_pending_standalone)
+            if pending:
+                return RedirectResponse("/welcome")
+        return await call_next(request)
+
+
+def _setup_pending_standalone():
+    conn = store.connect()
+    try:
+        return setup_pending(conn)
+    finally:
+        conn.close()
+
+
+app.add_middleware(WelcomeOnUpdate)
 
 
 @app.on_event("startup")
@@ -119,11 +157,13 @@ def _ctx(request, conn=None, precomputed=None, **extra):
         "work_statuses": sorted(WORK_STATUSES),
         "providers": VALID_PROVIDERS,
         "anthropic_models": ANTHROPIC_MODELS,
+        "llama_models": LLAMA_MODELS,
         "schedules": VALID_SCHEDULE,
         "kinds": VALID_KINDS,
         "extraction_methods": sorted(EXTRACTION_METHODS),
         "instruments_json": json.dumps(INSTRUMENTS),
         "categories_json": json.dumps(CATEGORIES),
+        "app_version": __version__,
     }
     ctx.update(extra)
     return ctx
@@ -356,6 +396,55 @@ def settings_page(request: Request, _: bool = Depends(_auth)):
     return templates.TemplateResponse(request, "settings.html", _ctx(request, nav="settings"))
 
 
+@app.get("/welcome", response_class=HTMLResponse)
+def welcome_page(request: Request, _: bool = Depends(_auth)):
+    """The once-per-update setup screen.
+
+    Standalone on purpose: no rail, no dashboard queries, just what changed
+    and the settings worth confirming before the app is used again.
+    """
+    conn = store.connect()
+    try:
+        settings = store.get_all(conn)
+    finally:
+        conn.close()
+    reader = (settings.get("provider") or "none").strip().lower()
+    if reader == "none":
+        reader_status = (False, "No reader picked yet. Pages get archived "
+                                "but nothing gets read until you choose one.")
+    elif reader == "llama" or (settings.get("%s_api_key" % reader) or "").strip():
+        reader_status = (True, "Already set up from before. Nothing to "
+                               "change unless you want to.")
+    else:
+        reader_status = (False, "Needs a key before anything gets read.")
+    # The saved model leads the list even if it is not a suggested one, so
+    # the select never silently changes a working setup.
+    current_llama = (settings.get("llama_model") or "").strip()
+    llama_models = [current_llama] if current_llama else []
+    llama_models += [m for m in LLAMA_MODELS if m != current_llama]
+    return templates.TemplateResponse(request, "welcome.html", {
+        "request": request,
+        "settings": store.mask(settings),
+        "version": __version__,
+        "whats_new": WHATS_NEW,
+        "reader_status": reader_status,
+        "checker_provider": check.checker_provider(settings),
+        "anthropic_models": ANTHROPIC_MODELS,
+        "llama_models": llama_models,
+    })
+
+
+@app.post("/api/setup/complete")
+def api_setup_complete(_: bool = Depends(_auth)):
+    """Stamp the welcome screen as seen for this version."""
+    conn = store.connect()
+    try:
+        store.put_many(conn, {"setup_seen_version": __version__})
+    finally:
+        conn.close()
+    return {"ok": True, "version": __version__}
+
+
 @app.get("/manual", response_class=HTMLResponse)
 def manual_page(request: Request, geoid: str = "", category: str = "",
                 _: bool = Depends(_auth)):
@@ -485,6 +574,9 @@ async def api_settings(request: Request, _: bool = Depends(_auth)):
         if body.get("search_provider") is not None \
                 and body["search_provider"] not in VALID_SEARCH:
             raise HTTPException(400, "invalid search provider")
+        if body.get("checker_provider") is not None \
+                and body["checker_provider"] not in VALID_CHECKER_PROVIDERS:
+            raise HTTPException(400, "invalid checker provider")
         updates = store.sanitize_updates(current, body)
         store.put_many(conn, updates)
     finally:
@@ -509,6 +601,32 @@ def api_provider_test(_: bool = Depends(_auth)):
         "ok": not err,
         "provider": s.get("provider"),
         "model": extract.default_model(s),
+        "response": (raw or "").strip()[:200],
+        "error": err,
+    }
+
+
+@app.post("/api/checker/test")
+def api_checker_test(_: bool = Depends(_auth)):
+    """One tiny completion against the second checker's provider and model."""
+    conn = store.connect()
+    try:
+        s = store.get_all(conn)
+    finally:
+        conn.close()
+    provider = check.checker_provider(s)
+    if provider == "none":
+        return {"ok": False, "provider": provider,
+                "error": "no provider for the checker — pick one and save first"}
+    raw, err = extract.chat(
+        s, "Reply with the single word: ready",
+        system="You are a connectivity test. Reply with exactly one word: ready",
+        model=(s.get("checker_model") or "").strip() or None,
+        provider=provider)
+    return {
+        "ok": not err,
+        "provider": provider,
+        "model": check.checker_model_name(s),
         "response": (raw or "").strip()[:200],
         "error": err,
     }

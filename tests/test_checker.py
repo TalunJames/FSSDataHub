@@ -165,11 +165,50 @@ class RunAndApplyTests(DbTest):
         self.assertEqual(self._status()["status"], "needs_review")
 
     def test_no_provider_fails_toward_review(self):
+        # checker_provider="" follows the extractor, so provider=none means
+        # the checker has nobody to run on either.
         verdict, _ = self.checkmod.run_and_apply(
-            self.conn, self._settings(provider="none"), None, self.geoid,
-            "sales_use", self.doc_text)
+            self.conn, self._settings(provider="none", checker_provider=""),
+            None, self.geoid, "sales_use", self.doc_text)
         self.assertEqual(verdict, "error")
         self.assertEqual(self._status()["status"], "needs_review")
+
+    def test_checker_runs_on_its_own_provider(self):
+        """The second pass defaults to the free local model.
+
+        Extraction stays on the paid API; the checker call must carry its own
+        provider so the same settings dict routes the two passes differently."""
+        raw = json.dumps({"verdicts": [
+            {"instrument_code": "municipal_general_sales", "verdict": "pass",
+             "reason": ""}]})
+        with mock.patch("collector.extract.chat", return_value=(raw, None)) as chat:
+            verdict, _ = self.checkmod.run_and_apply(
+                self.conn, self._settings(), None, self.geoid, "sales_use",
+                self.doc_text)
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(chat.call_args.kwargs["provider"], "llama")
+        row = self.conn.execute(
+            "SELECT provider, model FROM check_result").fetchone()
+        self.assertEqual(row["provider"], "llama")
+        self.assertEqual(row["model"], "llama3.1")
+
+    def test_empty_checker_provider_follows_the_extractor(self):
+        raw = json.dumps({"verdicts": []})
+        with mock.patch("collector.extract.chat", return_value=(raw, None)) as chat:
+            self.checkmod.run_and_apply(
+                self.conn, self._settings(checker_provider=""), None,
+                self.geoid, "sales_use", self.doc_text)
+        self.assertEqual(chat.call_args.kwargs["provider"], "anthropic")
+
+    def test_checker_model_still_overrides(self):
+        raw = json.dumps({"verdicts": []})
+        s = self._settings(checker_provider="llama", checker_model="llama3.2")
+        with mock.patch("collector.extract.chat", return_value=(raw, None)) as chat:
+            self.checkmod.run_and_apply(
+                self.conn, s, None, self.geoid, "sales_use", self.doc_text)
+        self.assertEqual(chat.call_args.kwargs["model"], "llama3.2")
+        row = self.conn.execute("SELECT model FROM check_result").fetchone()
+        self.assertEqual(row["model"], "llama3.2")
 
     def test_disabled_leaves_status_alone(self):
         verdict, _ = self.checkmod.run_and_apply(

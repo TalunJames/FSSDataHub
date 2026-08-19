@@ -158,14 +158,17 @@ def default_model(settings, provider=None):
     return None
 
 
-def chat(settings, prompt, system=SYSTEM, images=None, model=None, effort=None):
+def chat(settings, prompt, system=SYSTEM, images=None, model=None, effort=None,
+         provider=None):
     """One completion against the configured provider.
 
     Returns (raw_text, error). model overrides the provider's default —
     the second checker uses this to run a different (cheaper) model, and
-    effort lets it think harder than the extractor does.
+    effort lets it think harder than the extractor does. provider overrides
+    the extractor's provider entirely, which is how the checker runs on the
+    free local model while extraction stays on a paid API.
     """
-    provider = (settings.get("provider") or "none").strip().lower()
+    provider = (provider or settings.get("provider") or "none").strip().lower()
     if provider in ("", "none"):
         return None, "no AI provider configured"
     images = images or []
