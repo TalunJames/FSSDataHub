@@ -7,7 +7,9 @@ import threading
 import time
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+)
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,8 +24,8 @@ from taxdb.vocab import (
 )
 
 from . import (
-    __version__, autopilot, check, crawl, extract, intake, interview, present,
-    store, worker,
+    __version__, autopilot, check, crawl, extract, intake, interview, logs,
+    present, store, worker,
 )
 from .settings import (
     ANTHROPIC_MODELS, LLAMA_MODELS, VALID_CHECKER_PROVIDERS, VALID_KINDS,
@@ -32,6 +34,10 @@ from .settings import (
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
+
+# The ring buffer behind the diagnostic download; catches the crawl engine's
+# warnings and tracebacks too, since they go through standard logging.
+logs.install()
 
 app = FastAPI(title="Tax Database Collector", version=__version__)
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
@@ -1080,6 +1086,82 @@ def health():
         return JSONResponse({"ok": False, "error": str(exc)[:200]},
                             status_code=503)
     return {"ok": True}
+
+
+@app.get("/api/logs/export")
+def api_logs_export(_: bool = Depends(_auth)):
+    """Everything needed to investigate a failure, as one downloadable file.
+
+    The operator should never need SSH and `docker logs` to hand over
+    evidence: settings (secrets masked), recent runs, every recorded error,
+    and the tail of the application log, in plain text.
+    """
+    conn = store.connect()
+    parts = []
+
+    def section(title, lines):
+        parts.append("=" * 70)
+        parts.append(title)
+        parts.append("=" * 70)
+        parts.extend(lines or ["(nothing)"])
+        parts.append("")
+
+    def rows_of(sql, params=()):
+        try:
+            return [json.dumps(dict(r), default=str)
+                    for r in conn.execute(sql, params).fetchall()]
+        except Exception as exc:
+            return ["query failed: %s" % exc]
+
+    try:
+        s = store.get_all(conn)
+        section("FSSDataHub diagnostic", [
+            "version: %s" % __version__,
+            "generated (UTC): %s" % db.now(),
+            "database: %s" % db.db_path(),
+            "estimated Claude spend so far: $%s" % (s.get("spend_total_usd") or "0"),
+        ])
+        section("Settings (secrets masked)",
+                [json.dumps(store.mask(s), indent=1, sort_keys=True)])
+        section("Worker snapshot",
+                [json.dumps(worker.snapshot(), indent=1, default=str)])
+        section("Recent runs (newest first)", rows_of(
+            "SELECT id, mode, status, message, items_claimed, pages_fetched, "
+            "findings_written, started_at, finished_at FROM crawl_run "
+            "ORDER BY id DESC LIMIT 50"))
+        section("Recent page errors", rows_of(
+            "SELECT fetched_at, geoid, category, http_status, url, error "
+            "FROM crawl_page WHERE error IS NOT NULL ORDER BY id DESC LIMIT 100"))
+        section("Failed extractions", rows_of(
+            "SELECT created_at, geoid, category, provider, model, error "
+            "FROM crawl_extract WHERE parsed_ok=0 ORDER BY id DESC LIMIT 50"))
+        section("Batches", rows_of(
+            "SELECT id, status, n_items, n_succeeded, n_failed, message, "
+            "created_at, submitted_at, collected_at FROM extract_batch "
+            "ORDER BY id DESC LIMIT 25"))
+        section("Failed batch items", rows_of(
+            "SELECT id, geoid, category, status, error FROM extract_batch_item "
+            "WHERE status='failed' ORDER BY id DESC LIMIT 50"))
+        section("Checker flags and errors", rows_of(
+            "SELECT created_at, geoid, category, verdict, flags "
+            "FROM check_result WHERE verdict != 'pass' "
+            "ORDER BY id DESC LIMIT 100"))
+        section("Intake failures", rows_of(
+            "SELECT created_at, geoid, category, kind, filename, url, error "
+            "FROM intake_item WHERE status='failed' ORDER BY id DESC LIMIT 50"))
+        section("Blocked and flagged work items", rows_of(
+            "SELECT geoid, category, status, attempts, last_error, updated_at "
+            "FROM work_item WHERE status IN ('blocked','needs_review') "
+            "ORDER BY updated_at DESC LIMIT 100"))
+        tail = logs.tail()
+        section("Application log (last %d lines)" % len(tail), tail)
+    finally:
+        conn.close()
+
+    fname = "fssdatahub-diagnostic-%s.txt" % (
+        db.now()[:16].replace(" ", "-").replace(":", ""))
+    return PlainTextResponse("\n".join(parts), headers={
+        "Content-Disposition": 'attachment; filename="%s"' % fname})
 
 
 @app.get("/api/packet/{geoid}")

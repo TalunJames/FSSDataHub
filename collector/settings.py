@@ -161,6 +161,22 @@ VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
 # Shown on the welcome screen after an update. Plain words, newest release
 # only — this is read by the owner, not a developer.
 WHATS_NEW = (
+    ("Old documents can no longer overwrite newer rates",
+     "When the crawler digs up a dated older document — say a 2015 rate "
+     "sheet — its rate is now filed as history instead of replacing a newer "
+     "rate as current. When the dates are missing or ambiguous, the item is "
+     "flagged for your review instead of the machine guessing. The extractor "
+     "is also now told to record the document's own dates whenever they are "
+     "stated."),
+    ("Batch reading shows up in the activity feed",
+     "The home page timeline now notes when a bundle of items is sent to "
+     "Anthropic for reading and when its answers come back, so the quiet "
+     "stretch in between reads as progress, not a stall."),
+    ("A diagnostic report you can download",
+     "Settings now has a 'Download a diagnostic report' button: one text "
+     "file with your setup (keys masked), recent runs, every recorded "
+     "error, and the application log. If something ever misbehaves, that "
+     "file is what to hand over."),
     ("A hard stop at every $100 of spending",
      "Claude reading costs are now metered from each response's own token "
      "counts. After every $100 (change the amount in Settings, under 'How "

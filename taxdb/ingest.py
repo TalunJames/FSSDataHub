@@ -315,6 +315,36 @@ def _touch_work_item(conn, geoid, category):
 
 # ---------------------------------------------------------------- writers
 
+def _finding_year(eff, fy):
+    """Best comparable year from an effective_date or a fiscal_year."""
+    if eff:
+        try:
+            return int(str(eff)[:4])
+        except (TypeError, ValueError):
+            pass
+    if fy is not None:
+        try:
+            return int(fy)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _dates_regress(f, old):
+    """True when the incoming finding is CLEARLY older than the live row.
+
+    Full effective dates compare exactly; anything involving a bare
+    fiscal_year compares by year only, strictly — a tie or a missing date on
+    either side is never "older", so ambiguity falls through to the normal
+    supersede (which the checker then flags for a human)."""
+    new_eff, old_eff = f.get("effective_date"), old["effective_date"]
+    if new_eff and old_eff:
+        return str(new_eff)[:10] < str(old_eff)[:10]
+    ny = _finding_year(new_eff, f.get("fiscal_year"))
+    oy = _finding_year(old_eff, old["fiscal_year"])
+    return ny is not None and oy is not None and ny < oy
+
+
 def _write_findings(ctx, rows):
     conn = ctx.conn
     written = 0
@@ -325,10 +355,21 @@ def _write_findings(ctx, rows):
         # self-reference first so the partial unique index (live rows only)
         # lets the insert through; then point it at the new id.
         old = conn.execute(
-            "SELECT id FROM tax_instrument WHERE geoid=? AND category=? "
+            "SELECT id, effective_date, fiscal_year FROM tax_instrument "
+            "WHERE geoid=? AND category=? "
             "AND instrument_code=? AND superseded_by IS NULL",
             (f["geoid"], f["category"], f["instrument_code"])).fetchone()
-        if old:
+
+        # The crawler has no calendar of its own: a 2015 rate PDF found next
+        # year would arrive as the newest extraction. When the document's own
+        # dates say it is older than the rate already on file, record it as
+        # history — real data, never the current rate.
+        historical = bool(old and _dates_regress(f, old))
+        notes = f.get("notes")
+        if historical:
+            notes = ((notes + " | ") if notes else "") + (
+                "filed as history: dated earlier than the rate already on file")
+        if old and not historical:
             conn.execute(
                 "UPDATE tax_instrument SET superseded_by=id WHERE id=?", (old["id"],))
 
@@ -337,8 +378,9 @@ def _write_findings(ctx, rows):
             "status, rate_value, rate_unit, rate_basis, cap_type, cap_value, cap_unit, "
             "cap_note, voter_approval_required, effective_date, expiration_date, "
             "fiscal_year, statute_cite, source_id, archive_file_id, confidence, "
-            "extraction_method, researcher, retrieved_at, notes, source_quote) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "extraction_method, researcher, retrieved_at, notes, source_quote, "
+            "superseded_by) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (f["geoid"], f["category"], f["instrument_code"], f.get("label"),
              f["status"], f.get("rate_value"), f.get("rate_unit"), f.get("rate_basis"),
              f.get("cap_type"), f.get("cap_value"), f.get("cap_unit"), f.get("cap_note"),
@@ -348,8 +390,9 @@ def _write_findings(ctx, rows):
              f.get("extraction_method") or ctx.method,
              f.get("researcher") or ctx.researcher,
              f.get("retrieved_at") or ctx.retrieved_at,
-             f.get("notes"), f.get("source_quote")))
-        if old:
+             notes, f.get("source_quote"),
+             old["id"] if historical else None))
+        if old and not historical:
             conn.execute("UPDATE tax_instrument SET superseded_by=? WHERE id=?",
                          (cur.lastrowid, old["id"]))
         ctx.cite("tax_instrument", cur.lastrowid, f, source_id)

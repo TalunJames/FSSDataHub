@@ -38,6 +38,10 @@ Rules:
 - Give the rate exactly as published, with its unit. Do not convert mills to
   percent. Percentages are percentages: two-thirds is 66.67, not 0.6667.
 - Dates must be ISO YYYY-MM-DD.
+- Date every finding you can: fill effective_date or fiscal_year exactly as
+  the document states them. If a document is clearly from an earlier period,
+  still record what it says with its dates — but never present an old rate
+  as the current one.
 - confidence is high only when the figure is printed on a primary source.
 - Every tax finding must include source_quote: a short verbatim phrase copied
   from the documents that contains the rate, the prohibition, or the
