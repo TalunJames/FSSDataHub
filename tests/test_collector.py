@@ -31,6 +31,17 @@ class ExtractParseTests(unittest.TestCase):
         with self.assertRaises(self.ExtractError):
             self.parse("no json here")
 
+    def test_think_block_stripped(self):
+        # Reasoning models (Qwen3 on Ollama) prepend a monologue whose braces
+        # would otherwise poison the first-{-to-last-} extraction.
+        doc = self.parse('<think>Hmm, {"draft": 1}? No.</think>\n{"verdicts":[]}')
+        self.assertEqual(doc["verdicts"], [])
+
+    def test_unterminated_think_is_an_error(self):
+        # A think block the output cap cut off has no answer to parse.
+        with self.assertRaises(self.ExtractError):
+            self.parse('<think>Considering {"verdicts": []} but also')
+
 
 class CrawlPolicyTests(unittest.TestCase):
     def setUp(self):

@@ -90,7 +90,7 @@ DEFAULTS = {
     "anthropic_model": "claude-sonnet-5",
     "llama_base_url": "http://host.docker.internal:11434",
     "llama_api_key": "",
-    "llama_model": "llama3.1",
+    "llama_model": "qwen3-fast",
     "researcher": "collector",
     # Batch extraction. The same requests at half the price, returned within
     # the hour instead of the second. Off by default because it changes the
@@ -109,10 +109,20 @@ DEFAULTS = {
     # Items that pass are marked complete without human review; anything the
     # checker flags lands on the Review page with the reason.
     "checker_enabled": "1",
-    "checker_model": "",       # empty = same model as the extractor; with
-                               # Anthropic, claude-haiku-4-5 keeps checks cheap
+    # Where the second pass runs. Empty = the extractor's provider. Default
+    # is the local llama model: the check matters less than the extraction,
+    # and a free second opinion next door beats paying twice per item. If the
+    # local model cannot be reached, items fail toward review, never toward
+    # trust — the crawl keeps going, findings just wait for a person.
+    "checker_provider": "llama",
+    "checker_model": "",       # empty = the checker provider's default model;
+                               # with Anthropic, claude-haiku-4-5 keeps checks cheap
     "checker_max_chars": "80000",   # match max_text_chars: a quote in the
                                    # back half of the documents must be findable
+    # The version whose welcome screen was acknowledged. When it trails the
+    # running version, page loads land on /welcome once so an update is seen
+    # and anything new that needs a decision gets one.
+    "setup_seen_version": "",
 }
 
 # Shown as suggestions in the settings UI; the field stays free-text.
@@ -122,8 +132,38 @@ ANTHROPIC_MODELS = (
     "claude-opus-5",      # deepest reading; slowest and priciest
 )
 
+# Local models offered by name. Any model pulled into Ollama works; these
+# get first-class options because they are the realistic candidates for the
+# second checker on the NAS. The tag must match `ollama list` exactly.
+LLAMA_MODELS = (
+    "qwen3-fast",   # the checker default Carter picked
+    "llama3.1",     # lighter; fine when memory is tight
+    "gpt-oss:20b",  # stronger reasoning; needs more memory, pull it first
+)
+
 VALID_KINDS = sorted(JURISDICTION_KINDS)
 VALID_CATEGORIES = sorted(WORK_CATEGORIES)
 VALID_SEARCH = ("auto", "brave", "scrape")
 VALID_PROVIDERS = ("none", "openai", "anthropic", "llama")
+# Empty string = run the second pass on the extractor's own provider.
+VALID_CHECKER_PROVIDERS = ("", "llama", "anthropic", "openai")
 VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
+
+# Shown on the welcome screen after an update. Plain words, newest release
+# only — this is read by the owner, not a developer.
+WHATS_NEW = (
+    ("The double-check moved to your local model",
+     "The second AI pass that verifies each extraction now runs on the "
+     "NAS's own model (Ollama) by default, so double-checking is free. "
+     "You can pick which local model does it; qwen3-fast is the default. "
+     "Confirm below that the collector can reach it. If it ever can't, "
+     "nothing is trusted blindly: findings simply wait on the Review page."),
+    ("This setup screen is new",
+     "After every update, the app opens here once so you can see what "
+     "changed and fill in anything new it needs. Skip it any time; it "
+     "won't come back until the next update."),
+    ("Smarter crawling",
+     "The crawler now follows and stores only pages that look like they "
+     "are about taxes, bonds, and elections, so off-topic pages stop "
+     "costing money to read."),
+)

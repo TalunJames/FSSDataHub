@@ -132,7 +132,16 @@ def parse_json_payload(text):
     """Pull a JSON object out of a model response, including fenced blocks."""
     if text is None:
         raise ExtractError("empty model response")
-    raw = text.strip()
+    # Reasoning models (Qwen3 and friends on Ollama) may prepend a
+    # <think>...</think> monologue. Any brace inside it would poison the
+    # first-{-to-last-} extraction below, so it goes first. An unclosed
+    # think block means the output cap ate the answer: everything after the
+    # tag is monologue, and treating it as the reply parses garbage.
+    raw = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    if "<think>" in raw:
+        raise ExtractError("response is an unterminated <think> block "
+                           "with no answer after it")
+    raw = raw.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.S)
     if fenced:
         raw = fenced.group(1)
@@ -158,14 +167,17 @@ def default_model(settings, provider=None):
     return None
 
 
-def chat(settings, prompt, system=SYSTEM, images=None, model=None, effort=None):
+def chat(settings, prompt, system=SYSTEM, images=None, model=None, effort=None,
+         provider=None):
     """One completion against the configured provider.
 
     Returns (raw_text, error). model overrides the provider's default —
     the second checker uses this to run a different (cheaper) model, and
-    effort lets it think harder than the extractor does.
+    effort lets it think harder than the extractor does. provider overrides
+    the extractor's provider entirely, which is how the checker runs on the
+    free local model while extraction stays on a paid API.
     """
-    provider = (settings.get("provider") or "none").strip().lower()
+    provider = (provider or settings.get("provider") or "none").strip().lower()
     if provider in ("", "none"):
         return None, "no AI provider configured"
     images = images or []
