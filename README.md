@@ -190,8 +190,11 @@ the statute grep for profiles:
 ```
 
 The collector does all three on its own before it crawls anything; the buttons
-under Settings are only for jumping the queue. Adapter-filled work items are
-parked at `needs_review` so the crawler does not recrawl them.
+under Settings are only for jumping the queue. Adapter-filled work items close
+as `complete` with the adapter named: a published rate file with archived bytes
+and a tier-2 citation is better provenance than a crawled web page, so it is
+filed rather than queued for a human. They come back on the `refresh_days`
+timer like anything else.
 
 Archive a rate file before you have a parser for it. In 48 states, taxes
 that expired are only recoverable by differencing consecutive periods, and
@@ -224,6 +227,24 @@ database, in this order:
 When there is nothing left it says so, rather than reporting an empty queue as
 though the work were finished.
 
+Throughput and cost, both of which are settings rather than rewrites:
+
+- **`workers`** researches that many jurisdictions at once. Almost all of an
+  item is spent waiting on a web server and then a model, so this is the
+  throughput dial: one worker is roughly 860 items a day, or about four months
+  for the whole country. The fetch ceiling is global and divided among workers,
+  so raising it never increases the load on a county web server.
+- **`search_qpm`** caps search across the whole app, because search is the one
+  thing that does not scale with workers. `auto` is 60 with an API key and 12
+  without, and an engine that refuses is benched with escalating backoff while
+  the next one answers. Without a key, search alone limits the run to about two
+  items a minute however many workers run.
+- **`batch_extract`** sends the reading through the Message Batches API at half
+  price, back within the hour instead of the second. Extraction is most of the
+  bill and none of it is urgent. Items park at `awaiting_ai` while a batch is
+  out; the second checker still runs on each result as it lands, so what needs a
+  human does not change.
+
 Guards worth knowing about:
 
 - **Attempt ceiling.** A place whose rate page cannot be found is parked at
@@ -243,6 +264,19 @@ The second checker runs on all three passes, with a different skeptic's prompt
 for each: it re-reads rates against their quotes, measures against their
 canvasses, and thresholds against the statute text. What passes is filed
 without a human. What is flagged lands under **Review** with the reason.
+
+The mechanical checks that run first are sorted into two kinds, and the split
+is what keeps **Needs you** short. A *contradiction* — a rate outside any
+plausible range for its unit, a `prohibited` status carrying a rate, a rate
+above its own cap, a threshold stored as a fraction, a result dated in the
+future — goes straight to a human and does not spend a checker call. A
+*concern* — no source quote, a quote the text search could not locate, an
+unset source tier, no threshold on file yet — is handed to the model as
+context and the model rules on it. Concerns alone never queue an item. A bulk
+rate file has no prose to quote, and PDF text extraction mangles whitespace
+often enough that an exact quote miss is weak evidence; treating either as a
+defect put rows on the review page whose only fault was an empty optional
+field.
 
 Everything on this page has a manual equivalent under Settings, and autopilot
 can be switched off there entirely.
@@ -292,6 +326,17 @@ re-ingesting the same document updates rather than duplicating, that a
 percentage contradicting its own vote counts is refused, that autopilot plans
 state frameworks before local work and elections only for counties, and that a
 blocked search engine is reported instead of passing as an empty result.
+
+Concurrency and cost have their own suites, because both failed silently rather
+than loudly. Eight threads claiming one queue never take the same jurisdiction
+twice (the old read-then-write claim duplicated about a fifth of a batch). The
+request ceiling stays at thirty a minute whatever the worker count. Each worker
+gets its own Crawlee storage directory. One exploding county does not sink the
+other nineteen in its batch. A refusing search engine is benched rather than
+retried. Batch reading survives an unparseable result, an errored result, a
+failed submit, and a restart mid-flight; and thinking is always explicit,
+because omitting it on a current model quietly lets reasoning eat the token
+budget the JSON needed.
 
 ---
 

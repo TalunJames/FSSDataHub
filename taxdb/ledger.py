@@ -6,9 +6,18 @@ first 500 rows cover 40% of the U.S. population or 0.4% of it.
 """
 
 import math
+import sqlite3
 
 from . import db
 from .vocab import PASS_KINDS, WORK_CATEGORIES, WORK_STATUSES
+
+# An adapter-filled row is a published rate file with a period label, an
+# archived copy of the bytes, and a tier-2 citation. That is better provenance
+# than a crawled county web page, and there is nothing for a human to judge.
+# It is filed, not queued: parking it at needs_review put tens of thousands of
+# spreadsheet rows on the review page, which is where a real review queue goes
+# to die. Refresh still reaches these on the normal refresh_days timer.
+BULK_NOTE = "filled from a published bulk rate file; no human review needed"
 
 KIND_WEIGHT = {"state": 1000, "county": 100, "place": 10, "mcd": 5, "school": 20}
 
@@ -51,13 +60,13 @@ def plan(conn, states=None, kinds=("county", "place"), categories=None,
         for cat in categories:
             if cat in fixed and row["kind"] not in fixed[cat]:
                 continue
-            status = "pending"
+            status, done_at, note = "pending", None, None
             if _has_bulk(conn, row["geoid"], cat):
-                status = "needs_review"
+                status, done_at, note = "complete", db.now(), BULK_NOTE
             cur = conn.execute(
                 "INSERT OR IGNORE INTO work_item (geoid, category, priority, batch, "
-                "status, updated_at) VALUES (?,?,?,?,?,?)",
-                (row["geoid"], cat, pri, batch, status, db.now()),
+                "status, completed_at, last_error, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (row["geoid"], cat, pri, batch, status, done_at, note, db.now()),
             )
             created += cur.rowcount
     park_bulk_covered(conn)
@@ -65,9 +74,20 @@ def plan(conn, states=None, kinds=("county", "place"), categories=None,
     return created
 
 
+# RETURNING lets the claim be one statement, which is what makes it safe for
+# more than one worker. Added in SQLite 3.35 (2021); the container is 3.4x.
+_ATOMIC_CLAIM = sqlite3.sqlite_version_info >= (3, 35, 0)
+
+
 def claim(conn, limit=10, states=None, categories=None, batch=None, kinds=None,
           min_pop=None, max_attempts=None):
     """Take the next N pending items and mark them in progress.
+
+    Atomic, because several workers claim from this queue at once. The select
+    and the update are one statement, so SQLite's write lock decides the
+    winner and two workers cannot walk away with the same jurisdiction. The
+    old read-then-write form looked correct single-threaded and duplicated
+    work the moment a second worker existed.
 
     max_attempts keeps a jurisdiction whose rate page cannot be found from
     recycling forever at the head of the queue. Items that hit the ceiling are
@@ -76,7 +96,9 @@ def claim(conn, limit=10, states=None, categories=None, batch=None, kinds=None,
     park_bulk_covered(conn)
     if max_attempts:
         block_exhausted(conn, max_attempts)
-    sql = ("SELECT w.id, w.geoid, w.category, w.priority FROM work_item w "
+    # Ids only: this is the subquery an atomic UPDATE ... WHERE id IN (...)
+    # needs, and the RETURNING clause gives back the columns callers read.
+    sql = ("SELECT w.id FROM work_item w "
            "JOIN jurisdiction j ON j.geoid = w.geoid WHERE w.status = 'pending' "
            "AND NOT EXISTS (SELECT 1 FROM tax_instrument t "
            "WHERE t.geoid=w.geoid AND t.category=w.category "
@@ -103,12 +125,32 @@ def claim(conn, limit=10, states=None, categories=None, batch=None, kinds=None,
     sql += " ORDER BY w.priority DESC, w.geoid LIMIT ?"
     params.append(limit)
 
-    rows = conn.execute(sql, params).fetchall()
-    for r in rows:
-        conn.execute(
+    now = db.now()
+    if _ATOMIC_CLAIM:
+        rows = conn.execute(
             "UPDATE work_item SET status='in_progress', attempts=attempts+1, "
-            "claimed_at=?, updated_at=? WHERE id=?", (db.now(), db.now(), r["id"]))
-    conn.commit()
+            "claimed_at=?, updated_at=? WHERE id IN (%s) "
+            "RETURNING id, geoid, category, priority" % sql,
+            [now, now] + params).fetchall()
+        conn.commit()
+        return rows
+
+    # Old SQLite: take the write lock up front instead, which costs a little
+    # concurrency but keeps the same guarantee.
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        ids = [r["id"] for r in conn.execute(sql, params).fetchall()]
+        for wid in ids:
+            conn.execute(
+                "UPDATE work_item SET status='in_progress', attempts=attempts+1, "
+                "claimed_at=?, updated_at=? WHERE id=?", (now, now, wid))
+        rows = conn.execute(
+            "SELECT id, geoid, category, priority FROM work_item WHERE id IN (%s)"
+            % ",".join("?" * len(ids)), ids).fetchall() if ids else []
+        conn.execute("COMMIT")
+    finally:
+        conn.isolation_level = ""
     return rows
 
 
@@ -120,14 +162,16 @@ def _has_bulk(conn, geoid, category):
 
 
 def park_bulk_covered(conn):
-    """Pending items already filled by an adapter should not be crawled."""
+    """File items an adapter already answered, so they are neither crawled
+    nor put in front of a human. See BULK_NOTE."""
     cur = conn.execute(
-        "UPDATE work_item SET status='needs_review', updated_at=? "
-        "WHERE status IN ('pending','in_progress') AND EXISTS ("
+        "UPDATE work_item SET status='complete', completed_at=COALESCE(completed_at,?), "
+        "last_error=?, updated_at=? "
+        "WHERE status IN ('pending','in_progress','needs_review') AND EXISTS ("
         "  SELECT 1 FROM tax_instrument t WHERE t.geoid=work_item.geoid "
         "  AND t.category=work_item.category AND t.superseded_by IS NULL "
         "  AND t.extraction_method='bulk_import')",
-        (db.now(),))
+        (db.now(), BULK_NOTE, db.now()))
     conn.commit()
     return cur.rowcount
 

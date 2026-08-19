@@ -20,6 +20,7 @@ import asyncio
 import functools
 import logging
 import os
+import threading
 from datetime import timedelta
 from urllib.parse import urlparse
 
@@ -56,8 +57,23 @@ def browser_available():
     return True
 
 
-def storage_dir():
-    return os.path.join(db.DATA_DIR, "crawlee")
+# Crawlee purges its storage directory on start. Two workers sharing one
+# directory purge each other's request queue mid-run, so every worker gets its
+# own. The slot is set by the worker thread before it processes an item.
+_slot = threading.local()
+
+
+def set_slot(n):
+    _slot.n = int(n)
+
+
+def current_slot():
+    return getattr(_slot, "n", 0)
+
+
+def storage_dir(slot=None):
+    slot = current_slot() if slot is None else slot
+    return os.path.join(db.DATA_DIR, "crawlee", "w%d" % slot)
 
 
 def _tasks_per_minute(settings):
@@ -66,11 +82,18 @@ def _tasks_per_minute(settings):
     The old loop slept between every fetch, so 2.0 meant 30 fetches a
     minute for the whole item. Keep that ceiling, but let Crawlee spend it
     across several hosts at once instead of one at a time.
+
+    The ceiling is global, not per worker. Crawlee only knows about the item
+    in front of it, so the budget is divided by the worker count: eight
+    workers at two seconds still make thirty requests a minute between them,
+    which is what the setting says on the page and what a county's web server
+    experiences. Without the division, raising the worker count would quietly
+    multiply the load we put on government sites.
     """
     delay = store.as_float(settings.get("delay_seconds"), 2.0)
     if delay <= 0:
         return float("inf")
-    return max(1.0, 60.0 / delay)
+    return max(1.0, (60.0 / delay) / store.worker_count(settings))
 
 
 def _plan(settings):

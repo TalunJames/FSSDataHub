@@ -451,7 +451,7 @@ class FetcherTests(DbTest):
         self.seed()
         self.crawl_item(self.settings(
             max_pages_per_item="9", max_retries="5", concurrency="3",
-            delay_seconds="2.0"))
+            delay_seconds="2.0", workers="1"))
         opts = _FakeCrawler.started[0]
         self.assertEqual(opts["max_requests_per_crawl"], 9)
         self.assertEqual(opts["max_request_retries"], 5)
@@ -459,6 +459,27 @@ class FetcherTests(DbTest):
         self.assertEqual(opts["concurrency_settings"]["max_concurrency"], 3)
         self.assertAlmostEqual(
             opts["concurrency_settings"]["max_tasks_per_minute"], 30.0)
+
+    def test_request_ceiling_is_global_not_per_worker(self):
+        """Two seconds means thirty requests a minute, whatever the pool size.
+
+        Crawlee only sees the item in front of it, so the budget is divided by
+        the worker count. Without that, raising the worker count would quietly
+        multiply the load on county web servers while the settings page still
+        claimed thirty a minute."""
+        _FakeCrawler.pages = {
+            "https://franklincountyohio.gov/": (200, "text/html", COUNTY_HOME),
+        }
+        self.seed()
+        for workers in (1, 4, 8):
+            _FakeCrawler.started = []
+            self.crawl_item(self.settings(delay_seconds="2.0",
+                                          workers=str(workers)))
+            per_item = (_FakeCrawler.started[0]["concurrency_settings"]
+                        ["max_tasks_per_minute"])
+            self.assertAlmostEqual(per_item * workers, 30.0,
+                                   msg="global ceiling drifted at %d workers"
+                                       % workers)
 
     def test_second_search_round_when_first_finds_nothing(self):
         _FakeCrawler.pages = {
@@ -524,7 +545,8 @@ class BothEnginesReportSearchTests(DbTest):
     def _settings(self, **over):
         s = dict(self.store.get_all(self.conn))
         s.update({"web_search": "1", "browser_render": "0", "delay_seconds": "0",
-                  "search_provider": "scrape", "search_api_key": ""})
+                  "search_qpm": "0", "search_provider": "scrape",
+                  "search_api_key": ""})
         s.update(over)
         return s
 

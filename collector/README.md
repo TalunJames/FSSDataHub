@@ -35,9 +35,14 @@ Guards, all visible in the UI:
 - A place whose page cannot be found is parked as **stuck** after a few tries, not retried forever.
 - A search every engine refused is reported as blocked, so a throttled night never looks like a thorough one. Set a **Brave Search API key** under Settings to avoid it.
 - A county with no findable measures closes as **no data** with a coverage assertion recording that we looked, which is not the same as a blank.
+- Rows a bulk file already answered are filed as done, not queued for review.
 - Records older than `refresh_days` go back in the queue on their own.
 
 Every extraction is re-read by a **second checker** — deterministic sanity checks plus a second, skeptical model pass, with a different prompt per pass: rates are checked against their quotes, measures against their canvasses, thresholds against the statute text. Items that pass are marked `complete` automatically; only flagged items land under **Review**, with the reason attached. If the checker cannot run, items fail toward review, never toward trust. Turn it off under **Setup → Double-check the AI** to review everything by hand.
+
+The mechanical checks separate **contradictions** from **concerns**, and that split is what keeps **Needs you** worth opening. A contradiction (a rate outside any plausible range for its unit, a `prohibited` status carrying a rate, a rate above its own cap, a threshold stored as a fraction, a result dated in the future) goes to a human and skips the model call — there is nothing a second opinion adds. A concern (no source quote, a quote the search could not locate, an unset source tier, no threshold on file yet) is handed to the model as context, and the model decides whether it matters. Concerns on their own never queue an item for a human.
+
+Work items an adapter already answered are filed as **done** with the adapter named, not queued: a published rate file carries archived bytes and a tier-2 citation, which is stronger provenance than a crawled page. The SST files alone cover 24 states, so parking them for review buried the queue under tens of thousands of spreadsheet rows.
 
 The crawler respects `robots.txt`, stays on government hosts, rate-limits, and archives every byte before anyone extracts a number.
 
@@ -109,6 +114,7 @@ all live in `crawl.py` and are unchanged. `fetcher.py` is transport only.
 | setting | meaning |
 |---|---|
 | `use_crawlee` | off falls back to the old sequential loop |
+| `workers` | work items researched at once (the throughput dial) |
 | `concurrency` | parallel fetches within one work item |
 | `max_retries` | attempts per page before it is recorded as an error |
 | `browser_render` | re-fetch thin pages in headless Chromium |
@@ -116,9 +122,69 @@ all live in `crawl.py` and are unchanged. `fetcher.py` is transport only.
 | `render_min_chars` | an HTML page under this much text counts as thin |
 
 **Seconds between requests** still caps the rate. It used to be a sleep
-between single fetches; now it is a ceiling on fetches per minute for the item,
-spent across hosts instead of idling. Two seconds means thirty fetches a
-minute either way.
+between single fetches; now it is a ceiling on fetches per minute, spent across
+hosts instead of idling. Two seconds means thirty fetches a minute either way,
+**and that ceiling is global**: the budget is divided among workers, so raising
+the worker count never increases the load on a county web server.
+
+## The worker pool
+
+One coordinator thread decides what happens next; a pool of `workers` threads
+researches jurisdictions. Nearly all of a work item is spent waiting on a
+government web server and then on a model, so the pool is the throughput lever:
+a single worker manages roughly 860 items a day, which is about four months for
+a national run.
+
+Each worker owns its database connection, its Crawlee storage directory (Crawlee
+purges storage on start, so a shared directory would have one worker wipe
+another's request queue mid-run), and its slot in the status snapshot. Sharing
+the queue is safe because `ledger.claim` is one atomic statement: the read and
+the write used to be separate, which looked fine single-threaded and handed the
+same jurisdiction to two workers about a fifth of the time.
+
+One unresearchable jurisdiction no longer sinks the batch it was in. It goes
+back to the queue with the reason attached, and `max_attempts` still parks a
+repeat offender.
+
+**Search is what actually limits this.** Fetching is spread over thousands of
+government hosts, but every worker queries the same two or three search engines,
+and a scraped result page throttles by IP long before any documented limit. So
+search has its own process-wide ceiling (`search_qpm`, `auto` = 60 with an API
+key and 12 without), and an engine that refuses is benched with escalating
+backoff while the next one answers. Without a key, twelve queries a minute at
+about five queries an item is roughly two items a minute no matter how many
+workers run. **The Brave Search key is what makes the pool worth having.**
+
+## Batch reading
+
+Reading the documents is most of what a national run costs, and none of it is
+urgent: nobody is waiting on one county's lodging tax to come back in two
+seconds. **Read documents in batches** under Settings sends the same requests
+through the Message Batches API at half the price, returned within the hour
+instead of the second.
+
+Crawling and reading come apart when it is on:
+
+```
+off   crawl -> read -> ingest -> check
+on    crawl -> park ... submit ... collect -> ingest -> check
+```
+
+The crawler still archives every byte and builds the packet, then parks both and
+leaves the work item at `awaiting_ai` — a status `claim` will not take and the
+stale sweep will not touch, so it sits safely for hours. A submitter posts what
+has accumulated (`batch_min_items`, or anything at all when nothing else is in
+flight). A collector polls, ingests each result, and hands it to the second
+checker exactly as the live path does, so **what reaches Needs you does not
+change**.
+
+The second checker stays inline on purpose. It is the cheap model and a small
+share of the bill, it needs the ingest to have happened before it can read the
+rows back, and keeping it synchronous preserves fail-toward-review: a check that
+could not run leaves the item for a human rather than trusting it.
+
+Anthropic only. A failed submit leaves the items queued, because the crawl was
+the expensive part and the submit was not.
 
 **The browser pass** is the reason to want this. A county running CivicPlus,
 Granicus, or OpenGov renders its rate table in JavaScript, so an HTTP fetch

@@ -160,6 +160,14 @@ def _stats(conn):
     except Exception:
         auto_verified = 0
     blocked = n("SELECT COUNT(*) FROM work_item WHERE status='blocked'") if tot else 0
+    awaiting = n("SELECT COUNT(*) FROM work_item WHERE status='awaiting_ai'") if tot else 0
+    try:
+        batch_queued = n("SELECT COUNT(*) FROM extract_batch_item "
+                         "WHERE status='queued'")
+        batch_flight = n("SELECT COUNT(*) FROM extract_batch "
+                         "WHERE status IN ('submitted','ended')")
+    except Exception:
+        batch_queued = batch_flight = 0
     return {
         "jurisdictions": n_j,
         "work_items": tot,
@@ -167,6 +175,11 @@ def _stats(conn):
         "in_progress": in_progress,
         "needs_review": review,
         "blocked": blocked,
+        # Crawled and waiting on a batch read. Without this the dashboard reads
+        # as stalled while thousands of items are legitimately in flight.
+        "awaiting_ai": awaiting,
+        "batch_queued": batch_queued,
+        "batch_in_flight": batch_flight,
         "done": done,
         "pct_done": round(100.0 * done / tot, 1) if tot else 0,
         "auto_verified": auto_verified,
@@ -222,6 +235,9 @@ def _collecting_line(settings, stats, snap):
         return "Paused. Nothing is being collected."
     if snap.get("state") == "error":
         return snap.get("message") or "Something went wrong"
+    if stats.get("awaiting_ai") and not snap.get("step"):
+        return ("Crawling; %d item(s) waiting on a batch read"
+                % stats["awaiting_ai"])
     if snap.get("step"):
         return snap["step"]
     if snap.get("current_name"):

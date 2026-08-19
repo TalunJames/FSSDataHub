@@ -30,6 +30,14 @@ DEFAULTS = {
     # reliable. auto = use the API when a key is present, otherwise scrape.
     "search_provider": "auto",      # auto | brave | scrape
     "search_api_key": "",
+    # Queries per minute, process-wide, across every worker. Search is the one
+    # thing that does not scale with worker count: fetching is spread over
+    # thousands of government hosts, but every worker queries the same engines,
+    # and a scraped engine starts refusing long before any documented limit.
+    # auto = 60 with an API key, 12 when scraping. 0 = no ceiling.
+    # This is the real cap on throughput without a key: at ~5 queries an item,
+    # 12/min is about 2 items a minute no matter how many workers run.
+    "search_qpm": "auto",
     "schedule_enabled": "0",
     "schedule_kind": "daily",          # hourly | every_6h | daily | weekly
     "schedule_time": "02:00",
@@ -44,6 +52,12 @@ DEFAULTS = {
     "web_search": "1",
     "strict_robots": "0",
     "use_crawlee": "1",                # off = sequential httpx loop
+    # Work items researched at once. Nearly all of an item is spent waiting on
+    # the network and the model, so this is the throughput lever. It does not
+    # raise the load on any government host: delay_seconds is a global ceiling
+    # divided among workers. Past about 4, set a Brave Search key — scraped
+    # result pages are what gives out first.
+    "workers": "4",
     "concurrency": "4",                # parallel fetches within one item
     "max_retries": "3",
     "browser_render": "1",             # re-fetch thin pages in Chromium
@@ -64,13 +78,27 @@ DEFAULTS = {
     "llama_api_key": "",
     "llama_model": "llama3.1",
     "researcher": "collector",
+    # Batch extraction. The same requests at half the price, returned within
+    # the hour instead of the second. Off by default because it changes the
+    # feel of the app: an item is crawled now and read later, so findings stop
+    # appearing seconds after a page is fetched. For a national run that is a
+    # trade worth making — extraction is most of the bill and nothing about
+    # filling a ledger is latency-sensitive. Anthropic only.
+    "batch_extract": "0",
+    "batch_max_items": "200",   # requests per batch
+    "batch_min_items": "25",    # wait for this many before sending, unless idle
+    # Results ingested per coordinator tick. Downloading a batch is one HTTP
+    # stream; ingesting and second-checking each result is a model call, so
+    # applying is metered to keep a finished batch from stalling the crawl.
+    "batch_apply_per_tick": "25",
     # Second checker: a separate AI pass that sanity-checks each extraction.
     # Items that pass are marked complete without human review; anything the
     # checker flags lands on the Review page with the reason.
     "checker_enabled": "1",
     "checker_model": "",       # empty = same model as the extractor; with
                                # Anthropic, claude-haiku-4-5 keeps checks cheap
-    "checker_max_chars": "40000",
+    "checker_max_chars": "80000",   # match max_text_chars: a quote in the
+                                   # back half of the documents must be findable
 }
 
 # Shown as suggestions in the settings UI; the field stays free-text.

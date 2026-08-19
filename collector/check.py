@@ -3,18 +3,36 @@
 After the extractor writes findings for a (jurisdiction, category), this
 pass decides whether a human needs to look at them. Two layers:
 
-1. Deterministic checks — free, run always: the quoted source text must
-   actually appear in the crawled documents, rates must be plausible for
-   their unit, statuses must be internally consistent, and low-confidence
-   rows always go to a human.
-2. AI cross-check — a second model call with a skeptic's prompt: does the
-   quote support the number, is this the jurisdiction's own local rate
-   (not a state or combined rate), does the unit make sense.
+1. Deterministic checks — free, run always. These are sorted into two
+   kinds, and the distinction is the whole point of the pass:
 
-Everything that passes both is marked complete with no human review.
-Anything flagged lands on the Review page with the reasons attached.
-If the checker itself cannot run (API error), the item is flagged rather
-than silently passed — fail toward review, never toward trust.
+   *Hard* flags are internal contradictions no amount of judgement can
+   explain away: a rate outside any plausible range for its unit, a
+   'prohibited' status carrying a rate, a rate above its own cap, a
+   threshold recorded as a fraction, a result dated in the future. These
+   go straight to a human and skip the model call.
+
+   *Soft* flags are missing or weak optional metadata: no source quote, a
+   quote the text search could not locate, a tier-4 source, no threshold
+   on file yet. On their own these are not defects — a bulk rate file has
+   no prose to quote, and PDF text extraction mangles whitespace often
+   enough that exact quote matching produces more noise than signal.
+
+2. AI cross-check — a second model call with a skeptic's prompt, which is
+   handed the soft flags and asked to judge them. Does the quote support
+   the number, is this the jurisdiction's own local rate (not a state or
+   combined rate), does the unit make sense, and does any soft concern
+   actually matter here.
+
+Soft flags alone never queue an item for a human: the model decides. That
+is what keeps the review page a list of real judgement calls rather than a
+list of rows whose optional fields were empty.
+
+Everything that passes is marked complete with no human review. Anything
+with a hard flag, or that the model flags, lands on the Review page with
+the reasons attached. If the checker itself cannot run (API error), the
+item is flagged rather than silently passed — fail toward review, never
+toward trust.
 """
 
 import json
@@ -107,7 +125,7 @@ def live_rows(conn, geoid, category):
     return conn.execute(
         "SELECT t.id, t.instrument_code, t.label, t.status, t.rate_value, "
         "t.rate_unit, t.cap_value, t.cap_unit, t.confidence, t.source_quote, "
-        "t.notes, t.effective_date, s.url "
+        "t.notes, t.effective_date, t.extraction_method, s.url "
         "FROM tax_instrument t LEFT JOIN source s ON s.id=t.source_id "
         "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL",
         (geoid, category)).fetchall()
@@ -118,19 +136,48 @@ def _norm(text):
     return re.sub(r"[^a-z0-9.%$]+", " ", (text or "").lower()).strip()
 
 
+def _field(row, key, default=None):
+    """Read a column that may not be in every caller's SELECT list."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _flagger(flags):
+    """Collect flags, each tagged hard (a contradiction) or soft (a concern)."""
+    def flag(code, label, reason, hard=False):
+        flags.append({"code": code, "instrument_code": label, "reason": reason,
+                      "hard": bool(hard)})
+    return flag
+
+
+def hard_only(flags):
+    return [f for f in flags if f.get("hard")]
+
+
+def soft_only(flags):
+    return [f for f in flags if not f.get("hard")]
+
+
 def deterministic_flags(rows, doc_text):
     flags = []
+    flag = _flagger(flags)
     norm_doc = _norm(doc_text) if doc_text else ""
-
-    def flag(code, instrument, reason):
-        flags.append({"code": code, "instrument_code": instrument, "reason": reason})
 
     for r in rows:
         inst = r["instrument_code"]
+        # A bulk rate file is a spreadsheet, not prose. There is nothing to
+        # quote, and demanding a quote of it queues every adapter-filled row
+        # for a human who has nothing to add.
+        from_bulk = _field(r, "extraction_method") == "bulk_import"
         quote = (r["source_quote"] or "").strip()
         if not quote:
-            flag("no_quote", inst, "no source_quote to verify against")
+            if not from_bulk:
+                flag("no_quote", inst, "no source_quote to verify against")
         elif norm_doc and _norm(quote) not in norm_doc:
+            # Soft: PDF text extraction mangles whitespace, ligatures and
+            # hyphenation often enough that an exact miss is weak evidence.
             flag("quote_missing", inst,
                  "source_quote not found in the crawled text")
         rate, unit = r["rate_value"], r["rate_unit"]
@@ -139,13 +186,13 @@ def deterministic_flags(rows, doc_text):
             if not (lo <= rate <= hi):
                 flag("implausible_rate", inst,
                      "%s %s is outside the plausible range for that unit"
-                     % (rate, unit))
+                     % (rate, unit), hard=True)
         if r["status"] == "prohibited" and rate is not None:
             flag("status_conflict", inst,
-                 "status is 'prohibited' but a rate_value is recorded")
+                 "status is 'prohibited' but a rate_value is recorded", hard=True)
         if (r["cap_value"] is not None and rate is not None
                 and r["cap_unit"] == unit and rate > r["cap_value"]):
-            flag("over_cap", inst, "rate is above its own recorded cap")
+            flag("over_cap", inst, "rate is above its own recorded cap", hard=True)
         if r["confidence"] == "low":
             flag("low_confidence", inst,
                  "extractor marked this low confidence")
@@ -184,16 +231,19 @@ def live_framework(conn, usps, limit=80):
 def measure_flags(rows, doc_text):
     """Deterministic checks on recorded measures."""
     flags = []
+    flag = _flagger(flags)
     norm_doc = _norm(doc_text) if doc_text else ""
-
-    def flag(code, label, reason):
-        flags.append({"code": code, "instrument_code": label, "reason": reason})
 
     for r in rows:
         label = r["measure_id_local"] or r["election_date"]
         if r["votes_total"] is None and r["pct_yes"] is None:
-            flag("no_result", label, "no vote counts and no percentage recorded")
+            # Hard: a measure with neither counts nor a percentage cannot be
+            # placed against a threshold, so it is not yet a finding.
+            flag("no_result", label, "no vote counts and no percentage recorded",
+                 hard=True)
         if r["threshold_required"] is None:
+            # Soft, and usually about sequencing rather than the measure: the
+            # state framework pass has not landed yet.
             flag("no_threshold", label,
                  "no threshold on file for this measure class, so the margin "
                  "against threshold cannot be computed — run the state "
@@ -212,17 +262,16 @@ def measure_flags(rows, doc_text):
         if r["election_date"] and r["election_date"] > db.now()[:10] \
                 and r["outcome"] in ("passed", "failed"):
             flag("future_result", label,
-                 "election date is in the future but a result is recorded")
+                 "election date is in the future but a result is recorded",
+                 hard=True)
     return flags
 
 
 def framework_flags(rows, doc_text):
     """Deterministic checks on recorded thresholds and caps."""
     flags = []
+    flag = _flagger(flags)
     norm_doc = _norm(doc_text) if doc_text else ""
-
-    def flag(code, label, reason):
-        flags.append({"code": code, "instrument_code": label, "reason": reason})
 
     for r in rows:
         keys = r.keys()
@@ -230,9 +279,11 @@ def framework_flags(rows, doc_text):
         if "threshold_value" in keys and r["threshold_value"] is not None:
             tv = r["threshold_value"]
             if tv <= 1.0:
+                # Hard: a fraction stored as a percentage makes every margin
+                # computed against it wrong.
                 flag("threshold_scale", label,
                      "threshold %s looks like a fraction; percentages are "
-                     "expected (two-thirds is 66.67)" % tv)
+                     "expected (two-thirds is 66.67)" % tv, hard=True)
             elif tv < 50.0:
                 flag("threshold_low", label,
                      "threshold %s%% is below a simple majority" % tv)
@@ -254,23 +305,51 @@ def framework_flags(rows, doc_text):
     return flags
 
 
+CONCERN_GUIDANCE = """
+These are automated concerns raised by cheap mechanical checks, not defects.
+They are yours to judge, and most of them are noise. A bulk rate file has no
+prose to quote. PDF text extraction routinely mangles whitespace, ligatures
+and hyphenation, so a quote the text search could not locate is usually still
+a correct quote. A source tier is often just an un-set field. A missing
+threshold means the state framework pass has not run yet, which says nothing
+about the row in front of you.
+
+Judge the findings on the evidence. Do not flag a row because one of these
+concerns is attached to it — flag it only if, reading the documents, you
+think the recorded value is actually wrong or unsupportable.
+"""
+
+
 def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
-             system=None):
+             system=None, concerns=None):
     """Returns (flags, error). error is set when the checker call failed."""
-    max_chars = store.as_int(settings.get("checker_max_chars"), 40000)
+    max_chars = store.as_int(settings.get("checker_max_chars"), 80000)
     # Whatever columns the subject query selected, minus the internal id.
     findings = [{k: r[k] for k in r.keys() if k != "id"} for r in rows]
+    concern_block = ""
+    if concerns:
+        concern_block = (
+            "## Automated concerns to weigh\n```json\n%s\n```\n%s\n"
+            % (json.dumps([{"row": c.get("instrument_code"),
+                            "concern": c.get("reason")} for c in concerns],
+                          indent=1),
+               CONCERN_GUIDANCE))
     prompt = (
         "## Jurisdiction\n%s\n\n## Category\n%s\n\n"
         "## Findings to verify\n```json\n%s\n```\n\n"
+        "%s"
         "## Source documents (truncated)\n%s\n\n"
         "Respond with JSON only."
         % (jurisdiction, category,
            json.dumps(findings, indent=1),
+           concern_block,
            (doc_text or "_none — rely on the quotes and common sense_")[:max_chars]))
     model = (settings.get("checker_model") or "").strip() or None
+    # The checker thinks harder than the extractor on purpose: its whole job
+    # is to be skeptical, and a checker that rubber-stamps is worse than none.
     raw, err = extract.chat(settings, prompt, system=system or CHECK_SYSTEM,
-                            images=images, model=model)
+                            images=images, model=model,
+                            effort=extract.DEFAULT_CHECKER_EFFORT)
     if err:
         return [], err
     try:
@@ -309,7 +388,8 @@ def summarize(flags, limit=3):
     more = len(flags) - limit
     if more > 0:
         parts.append("+%d more" % more)
-    return "checker flagged — " + "; ".join(parts)
+    lead = ("contradiction found" if hard_only(flags) else "checker flagged")
+    return lead + " — " + "; ".join(parts)
 
 
 def subject(conn, geoid, category):
@@ -353,12 +433,27 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
                         (j["name"], j["state_usps"], j["kind"],
                          j["population"], geoid)) if j else geoid
 
-    flags = flag_fn(rows, doc_text)
+    mechanical = flag_fn(rows, doc_text)
+    hard = hard_only(mechanical)
+    soft = soft_only(mechanical)
+
+    # A contradiction is not a judgement call. Send it to a human and skip the
+    # model call entirely — there is nothing for a second opinion to add, and
+    # at ~22k tokens a call it is the one place skipping is free money.
+    if hard:
+        message = summarize(hard)
+        ledger.set_status(conn, geoid, category, "needs_review",
+                          error=message[:500])
+        record(conn, run_id, geoid, category, "flag", hard, settings)
+        conn.commit()
+        return "flag", message
+
     err = None
+    ai = []
     if (settings.get("provider") or "none") != "none":
-        more, err = ai_flags(settings, jurisdiction, category, rows,
-                             doc_text, images=images, system=system)
-        flags.extend(more)
+        ai, err = ai_flags(settings, jurisdiction, category, rows,
+                           doc_text, images=images, system=system,
+                           concerns=soft)
     else:
         err = "no AI provider for the checker"
 
@@ -366,13 +461,22 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
         verdict = "error"
         message = "second check unavailable (%s) — review by hand" % err[:200]
         ledger.set_status(conn, geoid, category, "needs_review", error=message)
-    elif flags:
+        flags = soft
+    elif ai:
+        # The model found something. Carry the soft concerns along as context
+        # for whoever reads the review page.
         verdict = "flag"
+        flags = ai + soft
         message = summarize(flags)
         ledger.set_status(conn, geoid, category, "needs_review", error=message[:500])
     else:
+        # Soft concerns only, and the model read the documents and was not
+        # troubled. That is the call we asked it to make: file it.
         verdict = "pass"
+        flags = soft
         message = "second check passed — auto-verified"
+        if soft:
+            message += " (%d mechanical concern(s) judged immaterial)" % len(soft)
         ledger.set_status(conn, geoid, category, "complete", error=None)
 
     record(conn, run_id, geoid, category, verdict, flags, settings)

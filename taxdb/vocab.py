@@ -109,6 +109,10 @@ EXTRACTION_METHODS = {"bulk_import", "agent_research", "manual", "api"}
 
 WORK_STATUSES = {
     "pending", "in_progress", "needs_review", "complete", "no_data", "blocked",
+    # Crawled and archived, waiting on a batch extraction to come back. Not
+    # claimable (claim only takes 'pending') and not stale-swept (release_stale
+    # only touches 'in_progress'), so it parks safely for hours.
+    "awaiting_ai",
 }
 
 SOURCE_TYPES = {

@@ -12,6 +12,8 @@ city (or a .gov/.us host). Social and tracker hosts are blocked.
 import hashlib
 import io
 import re
+import threading
+import time
 from collections import deque
 from urllib.parse import parse_qs, urljoin, urlparse, unquote
 from urllib.robotparser import RobotFileParser
@@ -161,6 +163,89 @@ def search_gov(client, name, state, category, kind=None, limit=12, settings=None
                       settings=settings, diag=diag)
 
 
+class _Throttle:
+    """Process-wide minimum interval between calls.
+
+    Search is the one thing that does not scale with worker count. Fetching is
+    already capped globally and spread across thousands of government hosts,
+    but every worker queries the same two or three search engines, and a
+    scraped engine starts refusing long before a rate limit is documented
+    anywhere. This keeps the query rate flat no matter how many workers run,
+    so adding workers speeds up crawling without turning a thorough night into
+    a throttled one.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self, per_minute):
+        if not per_minute or per_minute <= 0:
+            return
+        interval = 60.0 / float(per_minute)
+        with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next - now)
+            self._next = max(now, self._next) + interval
+        if delay:
+            time.sleep(delay)
+
+
+_search_throttle = _Throttle()
+
+
+class _EngineHealth:
+    """Bench a search engine that refuses, with escalating backoff.
+
+    A scraped result page throttles by IP and says so by serving a challenge,
+    which the parser sees as zero results. Retrying it on the very next query
+    burns the budget and deepens the throttle, so a refusing engine is benched
+    and the next engine in line answers instead. One success clears the record:
+    these throttles are transient, and a permanently benched engine would
+    quietly reduce coverage forever.
+    """
+
+    BASE_SECONDS = 45.0
+    CAP_SECONDS = 900.0
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._until = {}
+        self._strikes = {}
+
+    def available(self, name):
+        with self._lock:
+            return time.monotonic() >= self._until.get(name, 0.0)
+
+    def refused(self, name):
+        """Bench it. Returns how many seconds it is out for."""
+        with self._lock:
+            n = self._strikes.get(name, 0) + 1
+            self._strikes[name] = n
+            back = min(self.CAP_SECONDS, self.BASE_SECONDS * (2 ** (n - 1)))
+            self._until[name] = time.monotonic() + back
+            return back
+
+    def answered(self, name):
+        with self._lock:
+            self._strikes.pop(name, None)
+            self._until.pop(name, None)
+
+    def benched(self):
+        """Engine -> seconds remaining, for the status line."""
+        now = time.monotonic()
+        with self._lock:
+            return {k: int(v - now) for k, v in self._until.items() if v > now}
+
+    def reset(self):
+        with self._lock:
+            self._until.clear()
+            self._strikes.clear()
+
+
+_engine_health = _EngineHealth()
+
+
 def new_diag():
     """Counters for one item's searching, so a blocked engine is visible.
 
@@ -169,7 +254,21 @@ def new_diag():
     same as a thorough one.
     """
     return {"queries": 0, "answered": 0, "blocked": 0, "hits": 0,
-            "kept": 0, "provider": None}
+            "kept": 0, "provider": None, "skipped": 0, "benched": {}}
+
+
+# Queries per minute when `search_qpm` is left on auto. An API key buys a
+# documented allowance; a scraped result page does not, and throttles by IP.
+AUTO_QPM_API = 60
+AUTO_QPM_SCRAPE = 12
+
+
+def search_rate(settings, provider):
+    """Effective global queries-per-minute ceiling. 0 means unlimited."""
+    raw = (str(settings.get("search_qpm") or "auto")).strip().lower()
+    if raw in ("", "auto"):
+        return AUTO_QPM_API if provider == "brave" else AUTO_QPM_SCRAPE
+    return store.as_int(raw, AUTO_QPM_SCRAPE)
 
 
 def search_web(client, name, state, category, kind=None, limit=12, settings=None,
@@ -183,26 +282,45 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
         provider = "brave" if api_key else "scrape"
     diag["provider"] = provider
 
+    qpm = search_rate(settings, provider)
     out = []
     seen = set()
     for q in search_queries(name, state, category, kind):
         diag["queries"] += 1
         engines = []
         if provider == "brave" and api_key:
-            engines.append(lambda: _brave_search(client, api_key, q, limit=8))
-        engines.append(lambda: _ddg_search(client, q, limit=8))
-        engines.append(lambda: _bing_search(client, q, limit=8))
+            engines.append(
+                ("brave", lambda: _brave_search(client, api_key, q, limit=8)))
+        engines.append(("duckduckgo", lambda: _ddg_search(client, q, limit=8)))
+        engines.append(("bing", lambda: _bing_search(client, q, limit=8)))
 
-        hits, refusals = [], 0
-        for engine in engines:
+        hits, refusals, tried = [], 0, 0
+        for engine_name, engine in engines:
+            if not _engine_health.available(engine_name):
+                diag.setdefault("skipped", 0)
+                diag["skipped"] += 1
+                continue
+            # Spend the rate budget only on a call we are actually making.
+            # Sleeping for an engine that turns out to be benched wastes the
+            # allowance and, when everything is benched, wastes the whole run.
+            _search_throttle.wait(qpm)
+            tried += 1
             got, refused = engine()
-            refusals += 1 if refused else 0
-            if got:
+            if refused:
+                refusals += 1
+                back = _engine_health.refused(engine_name)
+                diag.setdefault("benched", {})[engine_name] = int(back)
+            elif got:
+                _engine_health.answered(engine_name)
                 hits = got
                 break
-        # Only a query that every engine refused counts as blocked. One engine
-        # answering with a genuine zero is a real (if unhelpful) answer.
-        blocked = not hits and refusals == len(engines)
+            else:
+                # A real, if unhelpful, zero. The engine is healthy.
+                _engine_health.answered(engine_name)
+        # Blocked means every engine we were willing to ask refused. If they
+        # were all benched there was nothing to ask, which is also blocked:
+        # the query went unanswered either way and must not read as a zero.
+        blocked = not hits and (tried == 0 or refusals == tried)
         if hits:
             diag["answered"] += 1
         elif blocked:
@@ -222,17 +340,35 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
     return out
 
 
+def _bench_note(diag):
+    benched = diag.get("benched") or {}
+    if not benched:
+        return ""
+    parts = ["%s for %dm" % (k, max(1, v // 60)) for k, v in sorted(benched.items())]
+    return "; benched " + ", ".join(parts)
+
+
+def _key_advice(diag):
+    """Scraped engines are what give out. Say so, once, where it is actionable."""
+    if (diag.get("provider") or "") == "brave":
+        return ""
+    return (" — set a Brave Search API key under Settings; scraped result "
+            "pages throttle by IP and this will keep happening")
+
+
 def search_note(diag):
     """One line for the run log, or None when searching went fine."""
     if not diag or not diag.get("queries"):
         return None
     if diag["blocked"] and not diag["answered"]:
-        return ("web search blocked: %d of %d queries refused by %s — findings "
-                "for this item were made without search"
-                % (diag["blocked"], diag["queries"], diag.get("provider") or "search"))
+        return ("web search blocked: %d of %d queries went unanswered%s — "
+                "findings for this item were made without search%s"
+                % (diag["blocked"], diag["queries"], _bench_note(diag),
+                   _key_advice(diag)))
     if diag["blocked"]:
-        return "web search partly blocked: %d of %d queries refused" % (
-            diag["blocked"], diag["queries"])
+        return ("web search partly blocked: %d of %d queries went unanswered%s%s"
+                % (diag["blocked"], diag["queries"], _bench_note(diag),
+                   _key_advice(diag)))
     if not diag["hits"]:
         return "web search returned no results for %d queries" % diag["queries"]
     return None

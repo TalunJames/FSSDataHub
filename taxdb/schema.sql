@@ -528,7 +528,7 @@ CREATE TABLE IF NOT EXISTS work_item (
     category      TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                       'pending','in_progress','needs_review',
-                      'complete','no_data','blocked')),
+                      'complete','no_data','blocked','awaiting_ai')),
     priority      INTEGER NOT NULL DEFAULT 0,
     batch         TEXT,
     attempts      INTEGER NOT NULL DEFAULT 0,

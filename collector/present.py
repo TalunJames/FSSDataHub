@@ -215,7 +215,9 @@ def inbox(conn, stats, settings, progress):
             "cta": "Add a source",
             "href": "/manual",
         })
-    if stats.get("ready") and not stats.get("pending") and not stats.get("in_progress"):
+    if (stats.get("ready") and not stats.get("pending")
+            and not stats.get("in_progress")
+            and not stats.get("awaiting_ai")):
         left = (progress or {}).get("juris_total", 0) - (progress or {}).get("juris_done", 0)
         items.append({
             "tone": "go",
@@ -425,7 +427,7 @@ RECORD_FILTERS = (
     ("all", "All", None),
     ("review", "Needs you", ("needs_review",)),
     ("published", "Published", ("complete",)),
-    ("working", "In progress", ("pending", "in_progress")),
+    ("working", "In progress", ("pending", "in_progress", "awaiting_ai")),
     ("none", "Not levied", ("no_data",)),
     ("stuck", "Stuck", ("blocked",)),
 )
@@ -441,6 +443,10 @@ STANDING = {
     "in_progress": ("Crawling now", "busy",
                     "The crawler is reading this place's website right now."),
     "pending": ("Queued", "busy", "Waiting its turn in the work list."),
+    "awaiting_ai": ("Waiting to be read", "busy",
+                    "The pages are fetched and filed. They go to the AI in the "
+                    "next batch, which costs half as much as reading them one "
+                    "at a time."),
     "blocked": ("Stuck", "busy",
                 "The crawler gave up after repeated failures. "
                 "Its last error is on the work list."),

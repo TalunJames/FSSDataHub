@@ -115,3 +115,55 @@ class RefreshTests(DbTest):
         self.place(geoid="3915000", name="Cleveland city", kind="place", pop=370000)
         rows = ledger.unplanned(self.conn, ["sales_use"], kinds=("county", "place"))
         self.assertEqual([r["geoid"] for r in rows], ["3918000", "3915000"])
+
+
+class ConcurrentClaimTests(DbTest):
+    """Several workers claim from one queue. Nobody gets the same row twice."""
+
+    def setUp(self):
+        super().setUp()
+        for i in range(120):
+            geoid = "39%05d" % (10000 + i)
+            self.place(geoid=geoid, name="Town %d" % i, pop=1000 + i)
+            self.conn.execute(
+                "INSERT INTO work_item (geoid, category, priority, status, updated_at) "
+                "VALUES (?,?,?,?,?)", (geoid, "property", 100 - i, "pending", db.now()))
+        self.conn.commit()
+
+    def test_eight_workers_never_double_claim(self):
+        import threading
+
+        claimed, errors = [], []
+        lock = threading.Lock()
+
+        def worker():
+            # Every worker owns its connection, as the real ones do.
+            conn = db.connect(path=self.db_path, apply=False)
+            try:
+                for _ in range(5):
+                    rows = ledger.claim(conn, limit=3)
+                    with lock:
+                        claimed.extend(r["geoid"] for r in rows)
+            except Exception as exc:                 # pragma: no cover
+                with lock:
+                    errors.append(exc)
+            finally:
+                conn.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        self.assertEqual(errors, [])
+        # The whole point: no jurisdiction researched twice.
+        self.assertEqual(len(claimed), len(set(claimed)),
+                         "the same work item was claimed by more than one worker")
+        in_progress = self.conn.execute(
+            "SELECT COUNT(*) FROM work_item WHERE status='in_progress'").fetchone()[0]
+        self.assertEqual(in_progress, len(claimed))
+        # attempts is bumped exactly once per claim, not once per racing worker.
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM work_item WHERE attempts > 1").fetchone()[0], 0)

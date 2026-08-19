@@ -77,7 +77,7 @@ class SstParseTests(DbTest):
         self.assertEqual(states["IN"], "2008Q4")
         self.assertTrue(all(f["filename"].endswith(".csv") for f in files))
 
-    def test_ingest_parks_work_items(self):
+    def test_ingest_files_work_items_without_human_review(self):
         from taxdb.adapters.sst import rows_to_findings
         from taxdb import ingest, ledger
         meta = {"state": "OH", "period": "2026Q1", "url": "https://example.test/OHR.csv"}
@@ -87,7 +87,12 @@ class SstParseTests(DbTest):
                         label="sst")
         claimed = ledger.claim(self.conn, limit=10, states=["OH"], categories=["sales_use"])
         self.assertEqual(claimed, [])
-        status = self.conn.execute(
-            "SELECT status FROM work_item WHERE geoid='39001' AND category='sales_use'"
-        ).fetchone()["status"]
-        self.assertEqual(status, "needs_review")
+        row = self.conn.execute(
+            "SELECT status, last_error, completed_at FROM work_item "
+            "WHERE geoid='39001' AND category='sales_use'").fetchone()
+        # Filed, not queued: a published rate file with a tier-2 citation and
+        # archived bytes has better provenance than a crawled web page, and
+        # tens of thousands of them would bury a real review queue.
+        self.assertEqual(row["status"], "complete")
+        self.assertIn("no human review needed", row["last_error"])
+        self.assertIsNotNone(row["completed_at"])

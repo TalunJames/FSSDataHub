@@ -161,3 +161,81 @@ class CheckerSubjectTests(DbTest):
         flags = self.check.framework_flags(
             rows, "Under ORC 133.18 a bond issue requires sixty percent.")
         self.assertEqual(flags, [])
+
+
+class EngineHealthTests(unittest.TestCase):
+    """A refusing engine is benched, not hammered."""
+
+    def setUp(self):
+        try:
+            from collector import crawl
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl = crawl
+        crawl._engine_health.reset()
+
+    def tearDown(self):
+        self.crawl._engine_health.reset()
+
+    def test_refusal_benches_and_success_clears(self):
+        health = self.crawl._engine_health
+        self.assertTrue(health.available("duckduckgo"))
+        back = health.refused("duckduckgo")
+        self.assertGreater(back, 0)
+        self.assertFalse(health.available("duckduckgo"))
+        self.assertIn("duckduckgo", health.benched())
+        health.answered("duckduckgo")
+        self.assertTrue(health.available("duckduckgo"))
+        self.assertEqual(health.benched(), {})
+
+    def test_backoff_escalates_and_is_capped(self):
+        health = self.crawl._engine_health
+        backoffs = [health.refused("bing") for _ in range(12)]
+        self.assertLess(backoffs[0], backoffs[1])
+        self.assertLessEqual(max(backoffs), health.CAP_SECONDS)
+
+    def test_benched_engine_is_skipped_not_retried(self):
+        """The engine that already refused is not asked again this round."""
+        calls = []
+
+        def refusing(*a, **kw):
+            calls.append("ddg")
+            return [], True
+
+        real_ddg, real_bing = self.crawl._ddg_search, self.crawl._bing_search
+        self.crawl._ddg_search = refusing
+        self.crawl._bing_search = lambda *a, **kw: (calls.append("bing"), ([], True))[1]
+        try:
+            diag = self.crawl.new_diag()
+            self.crawl.search_web(
+                None, "Franklin County", "OH", "lodging_meals", kind="county",
+                settings={"search_provider": "scrape", "search_api_key": "",
+                          "search_qpm": "0"}, diag=diag)
+        finally:
+            self.crawl._ddg_search = real_ddg
+            self.crawl._bing_search = real_bing
+
+        # Five queries, but each engine was asked exactly once before benching.
+        self.assertEqual(calls.count("ddg"), 1)
+        self.assertEqual(calls.count("bing"), 1)
+        self.assertEqual(diag["blocked"], diag["queries"])
+        self.assertGreater(diag["skipped"], 0)
+
+    def test_note_names_the_benched_engine_and_the_fix(self):
+        note = self.crawl.search_note({
+            "queries": 5, "answered": 0, "blocked": 5, "hits": 0, "kept": 0,
+            "provider": "scrape", "skipped": 8,
+            "benched": {"duckduckgo": 600, "bing": 600}})
+        self.assertIn("duckduckgo", note)
+        self.assertIn("Brave", note)
+
+    def test_note_does_not_push_a_key_at_someone_who_has_one(self):
+        note = self.crawl.search_note({
+            "queries": 5, "answered": 0, "blocked": 5, "hits": 0, "kept": 0,
+            "provider": "brave", "skipped": 0, "benched": {"brave": 120}})
+        self.assertNotIn("Brave Search API key", note)
+
+    def test_auto_rate_is_slower_when_scraping(self):
+        fast = self.crawl.search_rate({"search_api_key": "k"}, "brave")
+        slow = self.crawl.search_rate({"search_api_key": ""}, "scrape")
+        self.assertGreater(fast, slow)

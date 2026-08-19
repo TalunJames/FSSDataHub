@@ -118,3 +118,55 @@ CREATE TABLE IF NOT EXISTS interview_answer (
 
 CREATE INDEX IF NOT EXISTS idx_ia_lookup
     ON interview_answer(geoid, category, created_at);
+
+-- ============================================================ BATCH EXTRACTION
+-- Extraction is the dominant cost of a national run and none of it is
+-- latency-sensitive, which is exactly what the Batch API is for: the same
+-- request at half the price, returned within the hour rather than the second.
+-- Crawling and extraction therefore come apart. The crawler archives its pages
+-- and parks the packet here; a submitter posts a batch; a collector ingests the
+-- results and hands each one to the second checker as usual.
+
+CREATE TABLE IF NOT EXISTS extract_batch (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    remote_id       TEXT UNIQUE,          -- the provider's batch id
+    provider        TEXT NOT NULL,
+    model           TEXT,
+    status          TEXT NOT NULL CHECK (status IN (
+                        'building','submitted','ended','collected','failed')),
+    n_items         INTEGER NOT NULL DEFAULT 0,
+    n_succeeded     INTEGER NOT NULL DEFAULT 0,
+    n_failed        INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    submitted_at    TEXT,
+    collected_at    TEXT,
+    message         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_eb_status ON extract_batch(status, id);
+
+CREATE TABLE IF NOT EXISTS extract_batch_item (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id        INTEGER REFERENCES extract_batch(id),
+    custom_id       TEXT NOT NULL,        -- what the provider echoes back
+    run_id          INTEGER REFERENCES crawl_run(id),
+    geoid           TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    packet          TEXT NOT NULL,        -- the research packet, as sent
+    doc_text        TEXT,                 -- crawled text, kept for the checker
+    n_pages         INTEGER NOT NULL DEFAULT 0,
+    search_note     TEXT,
+    -- queued -> submitted -> ready -> done/failed. 'ready' is the split that
+    -- keeps a finished batch from stalling the crawl: downloading 200 results
+    -- is one HTTP stream, but ingesting and second-checking them is 200 model
+    -- calls, so the download completes and the applying is metered per tick.
+    status          TEXT NOT NULL CHECK (status IN (
+                        'queued','submitted','ready','done','failed')),
+    raw_response    TEXT,
+    error           TEXT,
+    created_at      TEXT NOT NULL,
+    UNIQUE(custom_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ebi_batch ON extract_batch_item(batch_id, status);
+CREATE INDEX IF NOT EXISTS idx_ebi_queued ON extract_batch_item(status, id);
