@@ -171,13 +171,24 @@ async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
                       seed_urls, ctx, plan["max_pages"])
 
     # The legacy loop searched a second time when the first pass found
-    # nothing tax-shaped. Keep that, with whatever page budget is left.
+    # nothing tax-shaped. Keep that, with whatever page budget is left —
+    # but only with wording this item has not already run, from the log.
     spent = len(ctx["pages"])
     if (spent < plan["max_pages"] and store.as_bool(settings.get("web_search"))
             and not crawl._has_signal(ctx["pages"])):
-        extra = await asyncio.to_thread(
-            functools.partial(crawl.search_web, client, name, state, category,
-                              kind=kind, limit=16, settings=settings, diag=diag))
+        from . import searchlog
+        extra_q = searchlog.plan_round(
+            conn, settings, geoid, category,
+            crawl.search_queries(name, state, category, kind),
+            exclude=(diag or {}).get("tried") or set(), allow_reflect=False)
+        extra = []
+        if extra_q:
+            extra = await asyncio.to_thread(
+                functools.partial(crawl.search_web, client, name, state,
+                                  category, kind=kind, limit=16,
+                                  settings=settings, diag=diag,
+                                  queries=extra_q))
+            searchlog.record_round(conn, geoid, category, diag)
         already = set(seed_urls)
         extra = [u for u in extra if u not in already]
         if extra:

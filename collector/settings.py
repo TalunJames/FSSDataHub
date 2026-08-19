@@ -38,6 +38,11 @@ DEFAULTS = {
     # This is the real cap on throughput without a key: at ~5 queries an item,
     # 12/min is about 2 items a minute no matter how many workers run.
     "search_qpm": "auto",
+    # Search memory. Every query tried for an item is logged with its
+    # outcome; a new round skips wording that already came up empty, and
+    # when nothing has been found yet the checker's model (free local by
+    # default) reads what the crawler did see and proposes new wording.
+    "search_learn": "1",
     "schedule_enabled": "0",
     "schedule_kind": "daily",          # hourly | every_6h | daily | weekly
     "schedule_time": "02:00",
@@ -161,6 +166,20 @@ VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
 # Shown on the welcome screen after an update. Plain words, newest release
 # only — this is read by the owner, not a developer.
 WHATS_NEW = (
+    ("Reviews now come with a recommendation",
+     "Every flagged item on the Review page now carries the checker's own "
+     "read: which button it would press (publish, try again, or no such "
+     "tax) and a sentence on what to look at first. The suggested button "
+     "is outlined. You still decide — the hint just means a review starts "
+     "from an opinion instead of a blank."),
+    ("Searching learns from rounds that find nothing",
+     "The collector now remembers every web search it has tried for each "
+     "place. When an item comes back for another try, wording that already "
+     "came up empty is not repeated — and if nothing has been found yet, "
+     "the local checker model reads what the crawler did see (the page "
+     "titles it reached, the searches that failed) and writes new search "
+     "wording for the next round. This runs on your NAS's own model, so "
+     "it costs nothing."),
     ("Old documents can no longer overwrite newer rates",
      "When the crawler digs up a dated older document — say a 2015 rate "
      "sheet — its rate is now filed as history instead of replacing a newer "

@@ -350,6 +350,48 @@ def flag_reasons(conn, geoid, category):
     return out
 
 
+# The checker's lean -> the review button it corresponds to.
+LEAN_STATUS = {"publish": "complete", "try_again": "pending",
+               "no_such_tax": "no_data"}
+LEAN_LABEL = {"complete": "Publish it", "pending": "Try again",
+              "no_data": "No such tax"}
+
+
+def checker_advice(conn, geoid, category, last_error=None):
+    """The checker's recommendation for this item, or a sensible fallback.
+
+    Returns {"status": <review button status or "">, "label": <button
+    label or "">, "hint": <plain sentence(s)>} or None when there is
+    nothing useful to say beyond the reasons already shown.
+    """
+    row = _one(
+        conn, "SELECT advice FROM check_result WHERE geoid=? AND category=? "
+              "ORDER BY id DESC LIMIT 1", (geoid, category))
+    if row and row["advice"]:
+        try:
+            adv = json.loads(row["advice"])
+        except ValueError:
+            adv = None
+        if isinstance(adv, dict) and (adv.get("hint") or adv.get("lean")):
+            status = LEAN_STATUS.get((adv.get("lean") or "").strip().lower(), "")
+            return {"status": status, "label": LEAN_LABEL.get(status, ""),
+                    "hint": (adv.get("hint") or "").strip()}
+    # Items that never reached the checker still deserve a pointer.
+    le = last_error or ""
+    if "returned 0 valid rows" in le:
+        return {"status": "pending", "label": LEAN_LABEL["pending"],
+                "hint": "The crawler reached pages but nothing usable came "
+                        "out of them. Trying again usually helps: the next "
+                        "round searches with new wording. If you know the "
+                        "right page, add it under Add a source."}
+    if "no AI provider" in le:
+        return {"status": "", "label": "",
+                "hint": "No AI provider is set, so nothing was read or "
+                        "checked. Set a provider in Settings, or type the "
+                        "facts in yourself."}
+    return None
+
+
 def review_items(conn, limit=40):
     """Everything waiting on a person, with the evidence beside it."""
     rows = _rows(
@@ -368,6 +410,8 @@ def review_items(conn, limit=40):
             "state_usps": r["state_usps"],
             "meta": "%s · %s" % (place_line(r), category_label(r["category"])),
             "reasons": flag_reasons(conn, r["geoid"], r["category"]),
+            "advice": checker_advice(conn, r["geoid"], r["category"],
+                                     last_error=r["last_error"]),
             "last_error": r["last_error"],
             "findings": [], "measures": [], "thresholds": [], "grants": [],
             "rate": None, "rate_note": "", "previous": None, "previous_note": "",

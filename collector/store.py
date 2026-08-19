@@ -36,6 +36,14 @@ def _migrate(conn):
     except Exception:
         pass
 
+    # The checker's recommendation for the reviewer (v0.6.0). Cheap retrofit.
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(check_result)")}
+        if cols and "advice" not in cols:
+            conn.execute("ALTER TABLE check_result ADD COLUMN advice TEXT")
+    except Exception:
+        pass
+
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='crawl_run'"
     ).fetchone()

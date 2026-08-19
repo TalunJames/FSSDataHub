@@ -762,7 +762,7 @@ class FetcherTests(DbTest):
         calls = []
 
         def fake_search(client, name, state, category, kind=None, limit=12,
-                        settings=None, diag=None):
+                        settings=None, diag=None, queries=None):
             calls.append(limit)
             return ["https://co.franklin.oh.us/lodging.pdf"] if calls else []
 
@@ -787,7 +787,7 @@ class FetcherTests(DbTest):
         self.seed()
 
         def fake_search(client, name, state, category, kind=None, limit=12,
-                        settings=None, diag=None):
+                        settings=None, diag=None, queries=None):
             return ["https://co.franklin.oh.us/lodging.pdf"]
 
         self.crawl.search_web = fake_search
