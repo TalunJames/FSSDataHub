@@ -147,6 +147,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
         "text_shas": set(),
         "seed_hosts": crawl.seed_hosts_for(seed_urls),
         "thin": [],
+        "blocked_docs": [],
     }
     try:
         asyncio.run(_run_item(
@@ -184,8 +185,11 @@ async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
             await _http_round(conn, plan, run_id, geoid, category, name, state,
                               extra, ctx, plan["max_pages"] - spent)
 
-    if plan["render"] and ctx["thin"] and browser_available():
-        await _render_round(conn, plan, run_id, geoid, category, ctx)
+    if plan["render"] and browser_available():
+        if ctx["thin"]:
+            await _render_round(conn, plan, run_id, geoid, category, ctx)
+        if ctx["blocked_docs"]:
+            await _fetch_round(conn, plan, run_id, geoid, category, ctx)
 
 
 async def _fresh_queue():
@@ -384,10 +388,15 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
         # A 401/403 here is bot protection answering an HTTP client, not the
         # site refusing the public record: mass.gov and census.gov blocked a
         # whole night's fetches this way while serving every browser that
-        # asked. Queue the page for the render round, where a real browser
-        # asks. 429 is excluded — that one means stop asking.
+        # asked. Ask again as a real browser: pages go to the render round,
+        # documents to a browser fetch (a rendered page cannot carry a PDF).
+        # 429 is excluded — that one means stop asking.
         if plan["render"] and _blocked_status(error) in (401, 403):
-            ctx["thin"].append(context.request.url)
+            target = context.request.url
+            if crawl.is_document_url(target):
+                ctx["blocked_docs"].append(target)
+            else:
+                ctx["thin"].append(target)
 
     try:
         await _run_capped(
@@ -459,6 +468,71 @@ async def _render_round(conn, plan, run_id, geoid, category, ctx):
             await rq.drop()
         except Exception:
             pass
+
+
+async def _fetch_round(conn, plan, run_id, geoid, category, ctx):
+    """Fetch bot-blocked documents through the browser's own network stack.
+
+    The render round answers for blocked HTML, but a rendered page cannot
+    carry a PDF — and the blocked URLs that matter are mostly PDFs (county
+    CAFRs, apportionment reports, rate tables). Playwright's request context
+    asks with the browser's own TLS and headers, so it is still literally a
+    browser doing the asking; it just hands back bytes instead of a page.
+    Robots was already consulted before the original fetch — only URLs that
+    were actually requested and then blocked can land here.
+    """
+    global _browser_broken
+    from . import crawl
+
+    urls = list(dict.fromkeys(ctx["blocked_docs"]))[:plan["render_pages"]]
+    if not urls:
+        return
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as exc:
+        _browser_broken = True
+        log.warning("browser fetch unavailable, keeping the blocks: %s", exc)
+        return
+
+    delay = 0.0 if plan["rate"] == float("inf") else 60.0 / plan["rate"]
+
+    async def _go():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True, args=["--no-sandbox"])
+            try:
+                bctx = await browser.new_context()
+                for i, url in enumerate(urls):
+                    if i:
+                        await asyncio.sleep(delay)
+                    try:
+                        resp = await bctx.request.get(
+                            url, timeout=HANDLER_TIMEOUT * 1000)
+                        blob = await resp.body()
+                        if len(blob) > plan["max_bytes"]:
+                            page = crawl.error_page(
+                                url, "response larger than %d bytes"
+                                % plan["max_bytes"])
+                        else:
+                            page = crawl.page_record(
+                                url, resp.url, resp.status,
+                                resp.headers.get("content-type", "") or "",
+                                blob)
+                        _keep(conn, run_id, geoid, category, page, ctx, plan,
+                              label="browser")
+                    except Exception as exc:
+                        log.info("browser fetch failed for %s: %s", url, exc)
+            finally:
+                await browser.close()
+
+    try:
+        await asyncio.wait_for(_go(), timeout=_round_deadline(plan, len(urls)))
+    except asyncio.TimeoutError:
+        log.warning("browser fetch round for %s/%s hit its ceiling; moving on",
+                    geoid, category)
+    except Exception as exc:
+        _browser_broken = True
+        log.warning("browser fetch failed, keeping the blocks: %s", exc)
 
 
 def _keep(conn, run_id, geoid, category, page, ctx, plan, archive=True,

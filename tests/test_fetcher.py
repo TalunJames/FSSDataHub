@@ -175,6 +175,70 @@ class _FakePlaywrightCrawler(_FakeCrawler):
                 _PwContext(req, _Page(req.url, html), _PwResponse(200)))
 
 
+class _FakeBrowserFetch:
+    """Canned responses for the browser-network fetch of blocked documents.
+
+    Mimics the playwright surface fetcher._fetch_round touches:
+    async_playwright() -> chromium.launch() -> new_context() -> request.get().
+    """
+
+    responses = {}   # url -> (status, ctype, blob)
+    fetched = []
+
+    class _Response:
+        def __init__(self, url, status, ctype, blob):
+            self.url = url
+            self.status = status
+            self.headers = _Headers({"content-type": ctype})
+            self._blob = blob
+
+        async def body(self):
+            return self._blob
+
+    class _RequestContext:
+        async def get(self, url, timeout=None):
+            _FakeBrowserFetch.fetched.append(url)
+            spec = _FakeBrowserFetch.responses.get(url)
+            if spec is None:
+                raise RuntimeError("net::ERR_FAILED at %s" % url)
+            status, ctype, blob = spec
+            return _FakeBrowserFetch._Response(url, status, ctype, blob)
+
+    class _Context:
+        request = None
+
+        def __init__(self):
+            self.request = _FakeBrowserFetch._RequestContext()
+
+    class _Browser:
+        async def new_context(self):
+            return _FakeBrowserFetch._Context()
+
+        async def close(self):
+            pass
+
+    class _Chromium:
+        async def launch(self, **kwargs):
+            return _FakeBrowserFetch._Browser()
+
+    class _PW:
+        chromium = None
+
+        def __init__(self):
+            self.chromium = _FakeBrowserFetch._Chromium()
+
+    class _Manager:
+        async def __aenter__(self):
+            return _FakeBrowserFetch._PW()
+
+        async def __aexit__(self, *args):
+            return False
+
+
+def _fake_async_playwright():
+    return _FakeBrowserFetch._Manager()
+
+
 class _FakeRequestQueue:
     """Mirrors the real contract fetcher relies on: open(alias=...,
     configuration=...) returns a queue, drop() deletes it. Aliases are
@@ -196,8 +260,10 @@ class _FakeRequestQueue:
 
 
 def _install_fake_crawlee():
-    """Put a minimal fake `crawlee` in sys.modules; return an undo callable."""
-    saved = {k: v for k, v in sys.modules.items() if k.split(".")[0] == "crawlee"}
+    """Put minimal fake `crawlee` and `playwright` packages in sys.modules;
+    return an undo callable."""
+    saved = {k: v for k, v in sys.modules.items()
+             if k.split(".")[0] in ("crawlee", "playwright")}
 
     root = types.ModuleType("crawlee")
     root.Request = _Request
@@ -216,15 +282,21 @@ def _install_fake_crawlee():
     storages = types.ModuleType("crawlee.storages")
     storages.RequestQueue = _FakeRequestQueue
 
+    pw_root = types.ModuleType("playwright")
+    pw_api = types.ModuleType("playwright.async_api")
+    pw_api.async_playwright = _fake_async_playwright
+
     for name, mod in (("crawlee", root), ("crawlee.configuration", config),
                       ("crawlee.crawlers", crawlers),
                       ("crawlee.http_clients", clients),
-                      ("crawlee.storages", storages)):
+                      ("crawlee.storages", storages),
+                      ("playwright", pw_root),
+                      ("playwright.async_api", pw_api)):
         sys.modules[name] = mod
 
     def undo():
         for name in list(sys.modules):
-            if name.split(".")[0] == "crawlee":
+            if name.split(".")[0] in ("crawlee", "playwright"):
                 del sys.modules[name]
         sys.modules.update(saved)
 
@@ -279,6 +351,8 @@ class FetcherTests(DbTest):
         _FakeCrawler.blocked = {}
         _FakeCrawler.started = []
         _FakePlaywrightCrawler.rendered = {}
+        _FakeBrowserFetch.responses = {}
+        _FakeBrowserFetch.fetched = []
         self.fetcher._browser_broken = False
         # No live search or web calls from these tests.
         self._real_search = crawl.search_web
@@ -551,6 +625,53 @@ class FetcherTests(DbTest):
         self.assertEqual(text, "")
         self.assertFalse(any(p.get("rendered") for p in pages))
 
+    def test_blocked_document_fetched_through_the_browser(self):
+        """A rendered page cannot carry a PDF, and the blocked URLs that
+        matter are mostly documents. Their bytes come back through the
+        browser's own network stack instead."""
+        url = "https://franklincountyohio.gov/lodging-rates.csv"
+        _FakeCrawler.blocked = {url: 403}
+        _FakeBrowserFetch.responses = {
+            url: (200, "text/csv",
+                  b"tax,rate\nCounty lodging tax,3.0 percent\n")}
+        self.seed(url)
+        pages, text = self.crawl_item(
+            self.settings(browser_render="1", max_pages_per_item="1"))
+        self.assertIn("3.0 percent", text)
+        # Fetched, not rendered — and never sent to the render crawler.
+        self.assertFalse(any(p.get("rendered") for p in pages))
+        self.assertEqual(_FakeBrowserFetch.fetched, [url])
+        # The block and the rescue are both on the record.
+        self.assertTrue(any("blocked" in (p.get("error") or "") for p in pages))
+        self.assertTrue(any(p.get("http_status") == 200 for p in pages))
+
+    def test_document_still_blocked_in_the_browser_stays_a_gap(self):
+        url = "https://franklincountyohio.gov/lodging-rates.pdf"
+        _FakeCrawler.blocked = {url: 403}
+        _FakeBrowserFetch.responses = {
+            url: (403, "text/html", b"<html><body>Access denied</body></html>")}
+        self.seed(url)
+        pages, text = self.crawl_item(
+            self.settings(browser_render="1", max_pages_per_item="1"))
+        self.assertEqual(text, "")
+        self.assertTrue(any((p.get("error") or "") == "HTTP 403" for p in pages))
+
+    def test_blocked_document_fetches_capped_like_renders(self):
+        home = b"""<html><body>
+        <a href="/tax-a.pdf">Tax A</a><a href="/tax-b.pdf">Tax B</a>
+        <a href="/tax-c.pdf">Tax C</a></body></html>"""
+        base = "https://franklincountyohio.gov"
+        _FakeCrawler.pages = {base + "/": (200, "text/html", home)}
+        _FakeCrawler.blocked = {
+            base + p: 403 for p in ("/tax-a.pdf", "/tax-b.pdf", "/tax-c.pdf")}
+        _FakeBrowserFetch.responses = {
+            u: (200, "text/csv", b"tax,rate\nlodging,3\n")
+            for u in _FakeCrawler.blocked}
+        self.seed(base + "/")
+        self.crawl_item(self.settings(
+            browser_render="1", max_render_pages="2", max_pages_per_item="4"))
+        self.assertEqual(len(_FakeBrowserFetch.fetched), 2)
+
     def test_blocked_status_parsing(self):
         f = self.fetcher._blocked_status
         self.assertEqual(f(_SessionError(
@@ -705,6 +826,8 @@ class BothEnginesReportSearchTests(DbTest):
         _FakeCrawler.blocked = {}
         _FakeCrawler.started = []
         _FakePlaywrightCrawler.rendered = {}
+        _FakeBrowserFetch.responses = {}
+        _FakeBrowserFetch.fetched = []
         self._real_ddg = crawl._ddg_search
         self._real_bing = crawl._bing_search
         self._real_seeds = crawl.seeds_for
