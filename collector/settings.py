@@ -51,6 +51,20 @@ DEFAULTS = {
     "max_text_chars": "80000",
     "web_search": "1",
     "strict_robots": "0",
+    # Follow filter. A link is fetched only when its own URL or link text
+    # matches the built-in tax and election keywords; these add to that
+    # list. The defaults cover local revenue-measure terms the built-ins
+    # miss: bond pages outside the elections pass, mill rates written
+    # without "millage", gross receipts pages, school sinking funds,
+    # special district and Mello-Roos financing, and fee schedules.
+    # Multi-word phrases match across spaces, hyphens, and underscores.
+    "crawl_keywords": ("bond, mill rate, gross receipts, sinking fund, "
+                       "special district, impact fee, fee schedule, "
+                       "mello-roos, community facilities district"),
+    # Keep only pages whose fetched content shows a keyword. Off-topic
+    # pages are still logged and their links still followed, but they are
+    # not archived and their text is not sent to the AI.
+    "content_filter": "1",
     "use_crawlee": "1",                # off = sequential httpx loop
     # Work items researched at once. Nearly all of an item is spent waiting on
     # the network and the model, so this is the throughput lever. It does not

@@ -189,6 +189,10 @@
           <label>Max depth <input type="number" name="max_depth" value="{{ settings.max_depth }}"></label>
           <label>Researcher label <input name="researcher" value="{{ settings.researcher }}"></label>
         </div>
+        <label>Extra crawl keywords <span class="dim">comma-separated, added to the built-in tax and election words; phrases also match hyphens and underscores in URLs</span>
+          <input name="crawl_keywords" value="{{ settings.crawl_keywords }}" placeholder="stormwater, impact fee"></label>
+        <label class="check"><input type="checkbox" name="content_filter" value="1" {% if settings.content_filter=='1' %}checked{% endif %}> Keep only pages whose content matches the keywords <span class="dim">off-topic pages are logged but not stored or sent to the AI</span></label>
+        <p class="hint">Links are only followed when their address or link text matches a keyword, and a fetched page only gets stored and read by the AI when its content does too. Documents (PDF, CSV, XLS) always pass both tests.</p>
         <label class="check"><input type="checkbox" name="web_search" value="1" {% if settings.web_search=='1' %}checked{% endif %}> Search the web for the county or city site when the catalog is not enough</label>
         <div class="grid2">
           <label>Search service

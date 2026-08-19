@@ -109,6 +109,7 @@ def _plan(settings):
         "render_pages": store.as_int(settings.get("max_render_pages"), 4),
         "render_min": store.as_int(settings.get("render_min_chars"), 400),
         "user_agent": settings.get("user_agent") or store.DEFAULTS["user_agent"],
+        "content_filter": store.as_bool(settings.get("content_filter", "1")),
     }
 
 
@@ -123,6 +124,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
 
     if diag is None:
         diag = crawl.new_diag()
+    crawl.configure_keywords(settings)
     j = conn.execute("SELECT kind FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     kind = j["kind"] if j else None
 
@@ -348,8 +350,11 @@ def _keep(conn, run_id, geoid, category, page, ctx, plan, archive=True,
     """Archive, record, and collect one page. Mirrors the legacy loop."""
     from . import crawl
 
+    # An off-topic page is still logged and its links still followed;
+    # only storage and model tokens are withheld from it.
+    keep = not plan["content_filter"] or crawl.content_relevant(page, category)
     aid = None
-    if archive and page.get("blob") and page.get("robots_allowed"):
+    if archive and keep and page.get("blob") and page.get("robots_allowed"):
         try:
             aid = crawl.archive_page(conn, page, period_label=label)
         except Exception as exc:
@@ -357,7 +362,7 @@ def _keep(conn, run_id, geoid, category, page, ctx, plan, archive=True,
     crawl.record_page(conn, run_id, geoid, category, page, aid)
     ctx["pages"].append(page)
 
-    if page.get("text") and not page.get("error"):
+    if keep and page.get("text") and not page.get("error"):
         header = "URL: %s\nTITLE: %s\n" % (
             page.get("final_url") or page["url"], page.get("title") or "")
         if page.get("rendered"):
@@ -369,7 +374,13 @@ def _keep(conn, run_id, geoid, category, page, ctx, plan, archive=True,
 
 
 def _is_thin(page, plan):
-    """An HTML page that came back with too little text to be the real page."""
+    """An HTML page that came back with too little text to be the real page.
+
+    No keyword test here: every page past the seeds already earned its
+    fetch through the follow filter, and the anchor text that qualified it
+    is gone by now — a URL-only re-test would starve JS rate pages whose
+    address is as plain as /rates.
+    """
     if page.get("rendered") or page.get("error") or not page.get("blob"):
         return False
     if "html" not in (page.get("content_type") or ""):

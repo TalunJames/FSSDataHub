@@ -69,6 +69,36 @@ GOV_HOST = re.compile(r"(^|\.)(gov|us|mil)$", re.I)
 
 _robots_cache = {}
 
+# User-supplied keywords from Settings, compiled once per value. They widen
+# the built-in relevance tests for a deployment chasing something the
+# defaults do not name (say, stormwater fees). Module state because the
+# follow tests are called from deep inside both fetch engines; every worker
+# reads the same settings row, so last-write-wins is harmless.
+_extra_lock = threading.Lock()
+_extra_cache = {"raw": None, "pattern": None}
+
+
+def configure_keywords(settings):
+    raw = ((settings or {}).get("crawl_keywords") or "").strip()
+    with _extra_lock:
+        if raw != _extra_cache["raw"]:
+            words = []
+            for w in raw.split(","):
+                parts = w.split()
+                if not parts:
+                    continue
+                # "mill rate" must also match /mill-rate, mill_rate.pdf,
+                # and millrate — URLs never spell phrases with spaces.
+                words.append(r"[\s_\-]?".join(re.escape(p) for p in parts))
+            _extra_cache["raw"] = raw
+            _extra_cache["pattern"] = (
+                re.compile("|".join(words), re.I) if words else None)
+
+
+def _matches_extra(blob):
+    pat = _extra_cache["pattern"]
+    return bool(pat and pat.search(blob))
+
 
 class FetchError(Exception):
     pass
@@ -585,7 +615,9 @@ def looks_relevant(url, anchor=""):
     if ext in SKIP_EXT:
         return False
     blob = "%s %s" % (url, anchor or "")
-    return bool(RELEVANT.search(blob)) or ext in (".pdf", ".csv", ".xls", ".xlsx")
+    if RELEVANT.search(blob) or _matches_extra(blob):
+        return True
+    return ext in (".pdf", ".csv", ".xls", ".xlsx")
 
 
 def os_ext(path):
@@ -833,12 +865,17 @@ def follow_targets(source_url, final_url, blob, depth, seed_hosts, name=None,
     obvious rate pages, which every caller puts at the front of its queue.
     category widens the test for the elections pass, where the useful links
     are canvasses and results abstracts rather than rate tables.
+
+    Every link must earn its place on its own URL and anchor text. An
+    earlier version followed everything on a page whose own URL matched a
+    keyword, which on a county site with a /taxes landing page meant nav
+    bars, calendars, and staff directories ate the whole page budget.
     """
     out = []
     for href, anchor in html_links(final_url, blob):
         if not allowed_host(urlparse(href).hostname, seed_hosts, name=name, state=state):
             continue
-        if should_follow(href, anchor, depth, category) or looks_relevant(source_url):
+        if should_follow(href, anchor, depth, category):
             out.append((href, is_document_url(href) or looks_relevant(href, anchor)))
     return out
 
@@ -850,6 +887,30 @@ def seed_hosts_for(urls):
         if host:
             hosts.add(host)
     return hosts
+
+
+def content_relevant(page, category=None):
+    """Does the fetched page itself contain anything we crawl for?
+
+    The follow filter can only judge a link's wording; this judges the
+    bytes that came back. Documents always count — a rate table PDF can
+    parse to almost no text and still be the whole point of the crawl.
+    """
+    url = page.get("final_url") or page.get("url") or ""
+    ctype = page.get("content_type") or ""
+    if is_document_url(url) or "pdf" in ctype:
+        return True
+    text = page.get("text") or ""
+    if not text:
+        return False
+    if RELEVANT.search(text) or _matches_extra(text):
+        return True
+    return bool(category == "elections" and ELECTION_RELEVANT.search(text))
+
+
+def content_filter_on(settings):
+    """Skip archiving and AI reading for pages with no keyword in their text."""
+    return store.as_bool((settings or {}).get("content_filter", "1"))
 
 
 def _has_signal(pages):
@@ -901,6 +962,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
     """
     if diag is None:
         diag = new_diag()
+    configure_keywords(settings)
     if crawlee_enabled(settings):
         from . import fetcher
         try:
@@ -939,6 +1001,8 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
 
     if diag is None:
         diag = new_diag()
+    configure_keywords(settings)
+    keep_all = not content_filter_on(settings)
     delay = store.as_float(settings.get("delay_seconds"), 2.0)
     max_pages = store.as_int(settings.get("max_pages_per_item"), 16)
     max_depth = store.as_int(settings.get("max_depth"), 3)
@@ -985,15 +1049,18 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
             time.sleep(delay)
         page = fetch_one(client, url, settings)
         fetched += 1
+        # An off-topic page is still logged and its links still followed;
+        # only storage and model tokens are withheld from it.
+        keep = keep_all or content_relevant(page, category)
         aid = None
-        if page.get("blob") and page.get("robots_allowed"):
+        if keep and page.get("blob") and page.get("robots_allowed"):
             try:
                 aid = archive_page(conn, page)
             except Exception as exc:
                 page["error"] = (page.get("error") or "") + "; archive: %s" % exc
         record_page(conn, run_id, geoid, category, page, aid)
         pages.append(page)
-        if page.get("text") and not page.get("error"):
+        if keep and page.get("text") and not page.get("error"):
             header = "URL: %s\nTITLE: %s\n" % (page.get("final_url") or url, page.get("title") or "")
             texts.append(header + page["text"])
 
