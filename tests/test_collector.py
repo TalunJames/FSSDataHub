@@ -433,3 +433,97 @@ class AnthropicTuningTests(unittest.TestCase):
     def test_extractor_asks_for_tier_and_corroboration(self):
         self.assertIn("authority_tier", self.extract.SYSTEM)
         self.assertIn("corroborating_sources", self.extract.SYSTEM)
+
+
+class KeywordFilterTests(unittest.TestCase):
+    """Only keyword-matching links are fetched; only keyword-matching
+    content is stored and read."""
+
+    def setUp(self):
+        try:
+            from collector import crawl
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl = crawl
+        self.crawl.configure_keywords({})
+
+    def tearDown(self):
+        self.crawl.configure_keywords({})
+
+    def test_relevant_source_page_does_not_fan_out(self):
+        # A page whose own URL matches a keyword must not drag every nav
+        # link on it into the queue; each link earns its place.
+        blob = b"""<html><body>
+        <a href="/parks">Parks and rec</a>
+        <a href="/calendar">Calendar</a>
+        <a href="/lodging-tax">Lodging tax</a>
+        </body></html>"""
+        targets = self.crawl.follow_targets(
+            "https://co.franklin.oh.us/taxes", "https://co.franklin.oh.us/taxes",
+            blob, 1, {"co.franklin.oh.us"}, name="Franklin County", state="OH")
+        urls = [u for u, _ in targets]
+        self.assertEqual(urls, ["https://co.franklin.oh.us/lodging-tax"])
+
+    def test_extra_keywords_widen_the_follow_test(self):
+        url = "https://co.franklin.oh.us/stormwater-fee"
+        self.assertFalse(self.crawl.looks_relevant(url))
+        self.crawl.configure_keywords({"crawl_keywords": "stormwater, impact fee"})
+        self.assertTrue(self.crawl.looks_relevant(url))
+
+    def test_content_relevant_keeps_tax_text(self):
+        page = {"url": "https://x.gov/a", "final_url": "https://x.gov/a",
+                "content_type": "text/html",
+                "text": "The county lodging tax is 3 percent."}
+        self.assertTrue(self.crawl.content_relevant(page))
+
+    def test_content_relevant_drops_offtopic_text(self):
+        page = {"url": "https://x.gov/parks", "final_url": "https://x.gov/parks",
+                "content_type": "text/html",
+                "text": "The pool opens Memorial Day weekend."}
+        self.assertFalse(self.crawl.content_relevant(page))
+
+    def test_content_relevant_always_keeps_documents(self):
+        page = {"url": "https://x.gov/rates.pdf", "final_url": "https://x.gov/rates.pdf",
+                "content_type": "application/pdf", "text": ""}
+        self.assertTrue(self.crawl.content_relevant(page))
+
+    def test_content_relevant_election_text_needs_category(self):
+        page = {"url": "https://x.gov/results", "final_url": "https://x.gov/results",
+                "content_type": "text/html",
+                "text": "Precinct summary for the bond issue."}
+        self.assertFalse(self.crawl.content_relevant(page))
+        self.assertTrue(self.crawl.content_relevant(page, category="elections"))
+
+    def test_extra_keywords_count_as_content(self):
+        page = {"url": "https://x.gov/fees", "final_url": "https://x.gov/fees",
+                "content_type": "text/html",
+                "text": "The stormwater fee schedule for 2026."}
+        self.assertFalse(self.crawl.content_relevant(page))
+        self.crawl.configure_keywords({"crawl_keywords": "stormwater"})
+        self.assertTrue(self.crawl.content_relevant(page))
+
+    def test_content_filter_defaults_on(self):
+        self.assertTrue(self.crawl.content_filter_on({}))
+        self.assertFalse(self.crawl.content_filter_on({"content_filter": "0"}))
+
+    def test_default_keywords_cover_revenue_measure_terms(self):
+        from collector.settings import DEFAULTS
+        self.crawl.configure_keywords(DEFAULTS)
+        self.assertTrue(self.crawl.looks_relevant(
+            "https://co.franklin.oh.us/2026-bond-program"))
+        self.assertTrue(self.crawl.looks_relevant(
+            "https://co.franklin.oh.us/gross-receipts"))
+        self.assertTrue(self.crawl.content_relevant({
+            "url": "https://x.gov/a", "final_url": "https://x.gov/a",
+            "content_type": "text/html",
+            "text": "The district's sinking fund renewal."}))
+        # Still off for pages none of the words describe.
+        self.assertFalse(self.crawl.looks_relevant(
+            "https://co.franklin.oh.us/parks"))
+
+    def test_phrase_keywords_match_url_spellings(self):
+        self.crawl.configure_keywords({"crawl_keywords": "mill rate"})
+        for url in ("https://x.gov/mill-rate", "https://x.gov/mill_rate.pdf",
+                    "https://x.gov/millrate"):
+            self.assertTrue(self.crawl.looks_relevant(url), url)
+        self.assertFalse(self.crawl.looks_relevant("https://x.gov/treadmill"))

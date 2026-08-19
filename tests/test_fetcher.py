@@ -291,6 +291,39 @@ class FetcherTests(DbTest):
         self.assertEqual(len(rows), len(pages))
         self.assertTrue(all(r["archive_file_id"] for r in rows))
 
+    def test_offtopic_page_logged_but_not_stored_or_read(self):
+        parks = (b"<html><head><title>Parks</title></head><body>"
+                 b"<p>The pool opens Memorial Day weekend.</p></body></html>")
+        _FakeCrawler.pages = {
+            "https://franklincountyohio.gov/parks": (200, "text/html", parks),
+        }
+        self.seed("https://franklincountyohio.gov/parks")
+        pages, text = self.crawl_item(self.settings())
+
+        self.assertEqual(len(pages), 1)
+        self.assertNotIn("Memorial Day", text)
+        row = self.conn.execute(
+            "SELECT archive_file_id, text_chars FROM crawl_page WHERE run_id=?",
+            (self.run_id,)).fetchone()
+        self.assertIsNone(row["archive_file_id"])
+        # The fetch itself is still on the ledger, gap included.
+        self.assertGreater(row["text_chars"], 0)
+
+    def test_content_filter_off_keeps_everything(self):
+        parks = (b"<html><head><title>Parks</title></head><body>"
+                 b"<p>The pool opens Memorial Day weekend.</p></body></html>")
+        _FakeCrawler.pages = {
+            "https://franklincountyohio.gov/parks": (200, "text/html", parks),
+        }
+        self.seed("https://franklincountyohio.gov/parks")
+        pages, text = self.crawl_item(self.settings(content_filter="0"))
+
+        self.assertIn("Memorial Day", text)
+        row = self.conn.execute(
+            "SELECT archive_file_id FROM crawl_page WHERE run_id=?",
+            (self.run_id,)).fetchone()
+        self.assertIsNotNone(row["archive_file_id"])
+
     def test_documents_go_first(self):
         _FakeCrawler.pages = {
             "https://franklincountyohio.gov/": (200, "text/html", COUNTY_HOME),
