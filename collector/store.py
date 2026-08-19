@@ -115,6 +115,26 @@ def _migrate(conn):
             "INSERT OR IGNORE INTO collector_setting (key, value, updated_at) "
             "VALUES ('model_default_migrated','1',?)", (db.now(),))
 
+    # One-time reader switch to Haiku (v0.5.2), chosen for cost: the second
+    # checker and the Review page are the quality net. A stored
+    # "claude-sonnet-5" is the old seeded default; any other value was set by
+    # hand and is left alone.
+    done = conn.execute(
+        "SELECT 1 FROM collector_setting "
+        "WHERE key='anthropic_model_haiku_migrated'").fetchone()
+    if not done:
+        row = conn.execute(
+            "SELECT value FROM collector_setting WHERE key='anthropic_model'"
+        ).fetchone()
+        if row and row["value"] == "claude-sonnet-5":
+            conn.execute(
+                "UPDATE collector_setting SET value=?, updated_at=? "
+                "WHERE key='anthropic_model'",
+                (DEFAULTS["anthropic_model"], db.now()))
+        conn.execute(
+            "INSERT OR IGNORE INTO collector_setting (key, value, updated_at) "
+            "VALUES ('anthropic_model_haiku_migrated','1',?)", (db.now(),))
+
     # One-time local-model upgrade for the second checker (v0.5.0). Before
     # checker_provider existed the llama settings sat unused, so a stored
     # "llama3.1" is the old seeded default, not a choice someone made. Any

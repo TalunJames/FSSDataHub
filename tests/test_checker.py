@@ -365,22 +365,25 @@ class MigrationTests(DbTest):
             self.store.start_run(self.conn, mode)
 
     def test_unused_default_model_upgraded_once(self):
+        """The old seeded reader default converges on the current default,
+        once, and a deliberate later choice is never touched."""
         self.store.apply_schema(self.conn)
         self.conn.execute(
-            "UPDATE collector_setting SET value='claude-haiku-4-5' "
+            "UPDATE collector_setting SET value='claude-sonnet-5' "
             "WHERE key='anthropic_model'")
         self.conn.execute(
-            "DELETE FROM collector_setting WHERE key='model_default_migrated'")
-        self.conn.commit()
-        self.store.apply_schema(self.conn)
-        s = self.store.get_all(self.conn)
-        self.assertEqual(s["anthropic_model"], "claude-sonnet-5")
-        # Second run must not overwrite a deliberate later choice.
-        self.store.put(self.conn, "anthropic_model", "claude-haiku-4-5")
+            "DELETE FROM collector_setting "
+            "WHERE key='anthropic_model_haiku_migrated'")
         self.conn.commit()
         self.store.apply_schema(self.conn)
         s = self.store.get_all(self.conn)
         self.assertEqual(s["anthropic_model"], "claude-haiku-4-5")
+        # Second run must not overwrite a deliberate later choice.
+        self.store.put(self.conn, "anthropic_model", "claude-sonnet-5")
+        self.conn.commit()
+        self.store.apply_schema(self.conn)
+        s = self.store.get_all(self.conn)
+        self.assertEqual(s["anthropic_model"], "claude-sonnet-5")
 
     def test_seeded_llama_model_upgraded_once(self):
         """The old seeded llama3.1 becomes the checker default, once.
