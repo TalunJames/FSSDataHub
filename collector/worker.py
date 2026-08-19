@@ -79,8 +79,27 @@ def start():
     if _thread and _thread.is_alive():
         return
     _cancel.clear()
+    conn = store.connect()
+    try:
+        _close_orphaned_runs(conn)
+    finally:
+        conn.close()
     _thread = threading.Thread(target=_loop, name="collector-worker", daemon=True)
     _thread.start()
+
+
+def _close_orphaned_runs(conn):
+    """A run still at 'running' belongs to a process that no longer exists.
+
+    Close it before the loop starts, or it sits in the run table looking
+    live forever. Safe here: this process has not started a run yet, and
+    only one process owns the database.
+    """
+    conn.execute(
+        "UPDATE crawl_run SET status='failed', finished_at=?, "
+        "message='interrupted — the collector was restarted' "
+        "WHERE status='running'", (db.now(),))
+    conn.commit()
 
 
 def request_stop():
@@ -416,6 +435,10 @@ def _run_batch(mode, limit):
         # connections across workers is the point.
         client = crawl.client_for(s)
 
+        # slot -> when that worker started its current item. Read by the
+        # stall watchdog below; plain dict ops are atomic enough for that.
+        item_started = {}
+
         def run_slot(slot):
             # Crawlee purges its storage on start, so each worker needs its own.
             fetcher_mod = None
@@ -431,6 +454,7 @@ def _run_batch(mode, limit):
                         row = pending.get_nowait()
                     except queue.Empty:
                         return
+                    item_started[slot] = time.monotonic()
                     try:
                         n_pages, n_find = _process(
                             wconn, client, s, run_id, row, slot=slot)
@@ -456,6 +480,7 @@ def _run_batch(mode, limit):
                             tally["errors"] += 1
                         _return_to_queue(wconn, row, exc)
                     finally:
+                        item_started.pop(slot, None)
                         _slot_clear(slot)
             finally:
                 wconn.close()
@@ -463,13 +488,25 @@ def _run_batch(mode, limit):
         threads = [threading.Thread(target=run_slot, args=(i,), daemon=True,
                                     name="collector-w%d" % i)
                    for i in range(n_workers)]
+        stall = 60.0 * store.as_float(s.get("item_stall_minutes"), 90)
         try:
             for t in threads:
                 t.start()
-            for t in threads:
-                t.join()
+            stalled = _join_or_abandon(threads, item_started, stall)
         finally:
             client.close()
+
+        abandoned_note = None
+        if stalled:
+            names = {w["slot"]: w.get("current_name")
+                     for w in snapshot()["workers"]}
+            for i in stalled:
+                _slot_clear(i)
+            what = ", ".join(filter(None, (names.get(i) for i in stalled))) \
+                or "%d worker(s)" % len(stalled)
+            abandoned_note = ("gave up waiting on a stalled worker (%s); its "
+                              "unfinished items go back in the queue within "
+                              "two hours" % what)
 
         stopped = _cancel.is_set()
         if stopped:
@@ -481,9 +518,13 @@ def _run_batch(mode, limit):
             _cancel.clear()
             return True
 
-        note = None
+        bits = []
         if tally["errors"]:
-            note = "%d item(s) errored and went back in the queue" % tally["errors"]
+            bits.append("%d item(s) errored and went back in the queue"
+                        % tally["errors"])
+        if abandoned_note:
+            bits.append(abandoned_note)
+        note = "; ".join(bits) or None
         store.finish_run(conn, run_id, "ok", note, items=tally["items"],
                          pages=tally["pages"], findings=tally["findings"])
         _set(state="idle", current_geoid=None, current_name=None, step="",
@@ -501,6 +542,34 @@ def _run_batch(mode, limit):
     finally:
         conn.close()
         _job.release()
+
+
+def _join_or_abandon(threads, item_started, stall_seconds):
+    """Join the pool, but never wait forever on a wedged worker.
+
+    A worker inside one item for longer than `stall_seconds` is not
+    researching, it is stuck: a crawl that never returned held one thread —
+    and with it the run, the batch ticks, and the whole coordinator — for
+    nine hours overnight. When every thread still alive is that stuck, stop
+    waiting. The run closes with a note, the stale sweep hands the stuck
+    items back within two hours, and the abandoned daemon threads either
+    finish late (their bookkeeping writes are harmless) or die with the
+    process.
+
+    Returns the abandoned slots, [] when the pool drained itself.
+    """
+    tick = min(15.0, max(0.1, stall_seconds / 4.0))
+    while True:
+        alive = [i for i, t in enumerate(threads) if t.is_alive()]
+        if not alive:
+            return []
+        now = time.monotonic()
+        stuck = [i for i in alive
+                 if now - item_started.get(i, now) > stall_seconds]
+        if len(stuck) == len(alive):
+            return stuck
+        for i in alive:
+            threads[i].join(timeout=tick)
 
 
 def _return_to_queue(conn, row, exc):
