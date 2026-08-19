@@ -290,6 +290,35 @@ def timeline(conn, limit=8):
             "text": text.strip(),
             "href": "/runs?run_id=%d" % r["id"],
         })
+    # Batch reading: one line when a bundle leaves for Anthropic, one when
+    # its answers come back, so the quiet stretch in between reads as
+    # progress rather than a stall.
+    for r in _rows(
+            conn, "SELECT id, status, n_items, message, created_at, "
+                  "submitted_at, collected_at FROM extract_batch "
+                  "WHERE COALESCE(collected_at, submitted_at, created_at) >= ? "
+                  "ORDER BY id DESC LIMIT 6", (edge,)):
+        n = r["n_items"] or 0
+        if r["submitted_at"]:
+            events.append({
+                "tone": "quiet", "ts": r["submitted_at"],
+                "text": "Sent a batch of %d item%s to Anthropic for reading."
+                        % (n, "" if n == 1 else "s"),
+            })
+        if r["collected_at"]:
+            events.append({
+                "tone": "good", "ts": r["collected_at"],
+                "text": "A batch of %d answer%s came back from Anthropic and "
+                        "is being filed." % (n, "" if n == 1 else "s"),
+            })
+        if r["status"] == "failed":
+            events.append({
+                "tone": "flag",
+                "ts": r["collected_at"] or r["submitted_at"] or r["created_at"],
+                "text": ("A batch could not be completed: %s"
+                         % (r["message"] or "no reason recorded"))[:160],
+            })
+
     events.sort(key=lambda e: e["ts"] or "", reverse=True)
     for e in events:
         e["time"] = when(e["ts"])

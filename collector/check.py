@@ -131,10 +131,17 @@ def _id_filter(ids, column="id"):
 
 def live_rows(conn, geoid, category, ids=None):
     where, params = _id_filter(ids, "t.id")
+    # prev_as_of: the best date on whatever this row displaced. The date
+    # checks in deterministic_flags use it to catch a stale document taking
+    # over from a newer rate — including data written before that guard
+    # existed, whenever a refresh re-checks the item.
     return conn.execute(
         "SELECT t.id, t.instrument_code, t.label, t.status, t.rate_value, "
         "t.rate_unit, t.cap_value, t.cap_unit, t.confidence, t.source_quote, "
-        "t.notes, t.effective_date, t.extraction_method, s.url "
+        "t.notes, t.effective_date, t.fiscal_year, t.extraction_method, s.url, "
+        "(SELECT MAX(COALESCE(p.effective_date, p.fiscal_year || '-01-01')) "
+        " FROM tax_instrument p WHERE p.superseded_by = t.id AND p.id != t.id) "
+        "AS prev_as_of "
         "FROM tax_instrument t LEFT JOIN source s ON s.id=t.source_id "
         "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL" + where,
         [geoid, category] + params).fetchall()
@@ -205,6 +212,35 @@ def deterministic_flags(rows, doc_text):
         if r["confidence"] == "low":
             flag("low_confidence", inst,
                  "extractor marked this low confidence")
+        # Time must not run backwards. Ingest files a clearly-older document
+        # as history, so a regression or a dated-to-undated replacement here
+        # means the machine could not tell which rate is current — a human
+        # must. Year-precision rows compare by year only, so a same-year
+        # refresh does not flag itself.
+        prev = _field(r, "prev_as_of")
+        if prev:
+            prev = str(prev)[:10]
+            eff = r["effective_date"]
+            fy = _field(r, "fiscal_year")
+            if eff:
+                if str(eff)[:10] < prev:
+                    flag("date_regression", inst,
+                         "current rate is dated %s but it replaced one dated "
+                         "%s — an older document may have taken over from a "
+                         "newer rate" % (str(eff)[:10], prev), hard=True)
+            elif fy is not None:
+                try:
+                    if int(fy) < int(prev[:4]):
+                        flag("date_regression", inst,
+                             "current rate is for %s but it replaced one "
+                             "dated %s — an older document may have taken "
+                             "over from a newer rate" % (fy, prev), hard=True)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                flag("undated_supersede", inst,
+                     "an undated rate replaced one dated %s — confirm which "
+                     "is actually current" % prev, hard=True)
     return flags
 
 
