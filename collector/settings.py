@@ -90,7 +90,7 @@ DEFAULTS = {
     "anthropic_model": "claude-sonnet-5",
     "llama_base_url": "http://host.docker.internal:11434",
     "llama_api_key": "",
-    "llama_model": "llama3.1",
+    "llama_model": "qwen3-fast",
     "researcher": "collector",
     # Batch extraction. The same requests at half the price, returned within
     # the hour instead of the second. Off by default because it changes the
@@ -132,10 +132,11 @@ ANTHROPIC_MODELS = (
     "claude-opus-5",      # deepest reading; slowest and priciest
 )
 
-# Local models offered by name. Any model pulled into Ollama works; these two
+# Local models offered by name. Any model pulled into Ollama works; these
 # get first-class options because they are the realistic candidates for the
-# second checker on the NAS.
+# second checker on the NAS. The tag must match `ollama list` exactly.
 LLAMA_MODELS = (
+    "qwen3-fast",   # the checker default Carter picked
     "llama3.1",     # lighter; fine when memory is tight
     "gpt-oss:20b",  # stronger reasoning; needs more memory, pull it first
 )
@@ -154,7 +155,7 @@ WHATS_NEW = (
     ("The double-check moved to your local model",
      "The second AI pass that verifies each extraction now runs on the "
      "NAS's own model (Ollama) by default, so double-checking is free. "
-     "You can pick which local model does it, llama3.1 or gpt-oss:20b. "
+     "You can pick which local model does it; qwen3-fast is the default. "
      "Confirm below that the collector can reach it. If it ever can't, "
      "nothing is trusted blindly: findings simply wait on the Review page."),
     ("This setup screen is new",

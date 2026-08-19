@@ -152,7 +152,7 @@
             </label>
             <label>API key <span class="dim">optional</span>
               <input name="llama_api_key" type="password" value="{{ settings.llama_api_key }}" autocomplete="off"></label>
-            <p class="hint">On TrueNAS, use the Ollama app's IP or <code>host.docker.internal:11434</code> if Ollama runs on the host. <code>gpt-oss:20b</code> judges better than <code>llama3.1</code> if the box has the memory; pull the model in Ollama before pointing at it.</p>
+            <p class="hint">On TrueNAS, use the Ollama app's IP or <code>host.docker.internal:11434</code> if Ollama runs on the host. The name must match <code>ollama list</code> exactly, and the model must be pulled before pointing at it; <code>qwen3-fast</code> is the checker default.</p>
           </fieldset>
           <fieldset>
             <legend>Second checker</legend>

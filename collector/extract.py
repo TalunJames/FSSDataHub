@@ -132,7 +132,16 @@ def parse_json_payload(text):
     """Pull a JSON object out of a model response, including fenced blocks."""
     if text is None:
         raise ExtractError("empty model response")
-    raw = text.strip()
+    # Reasoning models (Qwen3 and friends on Ollama) may prepend a
+    # <think>...</think> monologue. Any brace inside it would poison the
+    # first-{-to-last-} extraction below, so it goes first. An unclosed
+    # think block means the output cap ate the answer: everything after the
+    # tag is monologue, and treating it as the reply parses garbage.
+    raw = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    if "<think>" in raw:
+        raise ExtractError("response is an unterminated <think> block "
+                           "with no answer after it")
+    raw = raw.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.S)
     if fenced:
         raw = fenced.group(1)

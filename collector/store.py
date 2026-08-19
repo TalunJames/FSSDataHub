@@ -115,6 +115,23 @@ def _migrate(conn):
             "INSERT OR IGNORE INTO collector_setting (key, value, updated_at) "
             "VALUES ('model_default_migrated','1',?)", (db.now(),))
 
+    # One-time local-model upgrade for the second checker (v0.5.0). Before
+    # checker_provider existed the llama settings sat unused, so a stored
+    # "llama3.1" is the old seeded default, not a choice someone made. Any
+    # other value was set by hand and is left alone.
+    done = conn.execute(
+        "SELECT 1 FROM collector_setting WHERE key='llama_model_migrated'").fetchone()
+    if not done:
+        row = conn.execute(
+            "SELECT value FROM collector_setting WHERE key='llama_model'").fetchone()
+        if row and row["value"] == "llama3.1":
+            conn.execute(
+                "UPDATE collector_setting SET value=?, updated_at=? WHERE key='llama_model'",
+                (DEFAULTS["llama_model"], db.now()))
+        conn.execute(
+            "INSERT OR IGNORE INTO collector_setting (key, value, updated_at) "
+            "VALUES ('llama_model_migrated','1',?)", (db.now(),))
+
 
 def _pull_env_secrets(conn):
     """Fill empty secret rows from the environment on first boot."""

@@ -119,16 +119,16 @@
             <label>Which model
               <select name="llama_model">
                 {% for m in llama_models %}
-                <option value="{{ m }}" {% if settings.llama_model==m %}selected{% endif %}>{{ m }}{% if m=='llama3.1' %} — lighter{% elif m=='gpt-oss:20b' %} — smarter, needs more memory{% endif %}</option>
+                <option value="{{ m }}" {% if settings.llama_model==m %}selected{% endif %}>{{ m }}{% if m=='qwen3-fast' %} — recommended{% elif m=='llama3.1' %} — lighter{% elif m=='gpt-oss:20b' %} — smarter, needs more memory{% endif %}</option>
                 {% endfor %}
               </select>
             </label>
           </div>
           <p class="hint" style="margin-top:8px">On TrueNAS, use the Ollama app's IP, or
             <code>host.docker.internal:11434</code> if Ollama runs on the host.
-            <code>gpt-oss:20b</code> judges better if the NAS has the memory for it.
-            Whichever you pick must be pulled in Ollama first
-            (<code>ollama pull gpt-oss:20b</code>), then hit Test.</p>
+            The name must match what <code>ollama list</code> shows, and the model
+            must be pulled first (<code>ollama pull qwen3-fast</code>).
+            Hit Test and it will tell you either way.</p>
         </div>
         <div class="keyrow">
           <button type="button" class="btn btn-secondary" data-test="checker">Test the double-check</button>

@@ -190,7 +190,7 @@ class RunAndApplyTests(DbTest):
         row = self.conn.execute(
             "SELECT provider, model FROM check_result").fetchone()
         self.assertEqual(row["provider"], "llama")
-        self.assertEqual(row["model"], "llama3.1")
+        self.assertEqual(row["model"], "qwen3-fast")
 
     def test_empty_checker_provider_follows_the_extractor(self):
         raw = json.dumps({"verdicts": []})
@@ -321,6 +321,36 @@ class MigrationTests(DbTest):
         self.store.apply_schema(self.conn)
         s = self.store.get_all(self.conn)
         self.assertEqual(s["anthropic_model"], "claude-haiku-4-5")
+
+    def test_seeded_llama_model_upgraded_once(self):
+        """The old seeded llama3.1 becomes the checker default, once.
+
+        Before checker_provider existed the llama settings sat unused, so a
+        stored llama3.1 is leftover seeding, not a choice. A hand-set model,
+        or llama3.1 re-chosen after the upgrade, is never touched."""
+        self.store.apply_schema(self.conn)
+        self.conn.execute(
+            "UPDATE collector_setting SET value='llama3.1' WHERE key='llama_model'")
+        self.conn.execute(
+            "DELETE FROM collector_setting WHERE key='llama_model_migrated'")
+        self.conn.commit()
+        self.store.apply_schema(self.conn)
+        self.assertEqual(self.store.get(self.conn, "llama_model"), "qwen3-fast")
+        # Choosing llama3.1 again afterwards sticks.
+        self.store.put(self.conn, "llama_model", "llama3.1")
+        self.conn.commit()
+        self.store.apply_schema(self.conn)
+        self.assertEqual(self.store.get(self.conn, "llama_model"), "llama3.1")
+
+    def test_hand_set_llama_model_not_upgraded(self):
+        self.store.apply_schema(self.conn)
+        self.conn.execute(
+            "UPDATE collector_setting SET value='mistral' WHERE key='llama_model'")
+        self.conn.execute(
+            "DELETE FROM collector_setting WHERE key='llama_model_migrated'")
+        self.conn.commit()
+        self.store.apply_schema(self.conn)
+        self.assertEqual(self.store.get(self.conn, "llama_model"), "mistral")
 
     def test_key_never_set_by_masked_placeholder(self):
         self.store.apply_schema(self.conn)
