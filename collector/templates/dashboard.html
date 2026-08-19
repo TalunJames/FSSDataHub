@@ -1,102 +1,174 @@
 {% extends "base.html" %}
-{% block title %}Home{% endblock %}
+{% block title %}Today{% endblock %}
 {% block body %}
 
-{% if blockers %}
+<div class="dateline">
+  <p class="greeting">{{ greeting }}</p>
+  <p class="date">{{ dateline }}</p>
+</div>
+
+{% if blockers and blockers[0].id == 'seed' %}
 {% set b = blockers[0] %}
-<section class="panel start-card warn">
-  <h1>{{ b.title }}</h1>
-  <p class="lede">{{ b.detail }}</p>
-  <div class="row">
-    {% if b.href %}
-    <a class="btn primary-link big" href="{{ b.href }}">{{ b.action }}</a>
-    {% else %}
-    <button class="primary big" data-action="start">{{ b.action }}</button>
+<div class="headline">
+  <div class="words" style="padding-top:0">
+    <h1>{{ b.title }}</h1>
+    <p class="sub">{{ b.detail }}</p>
+    <div class="acts">
+      <button class="btn btn-primary" data-action="start" id="btn-start">{{ b.action }}</button>
+    </div>
+  </div>
+</div>
+{% else %}
+
+<div class="headline">
+  <span class="cmyk-num" id="open-count">
+    <span class="paper">{{ stats.needs_review }}</span>
+    <span class="plate plate-c" aria-hidden="true">{{ stats.needs_review }}</span>
+    <span class="plate plate-m" aria-hidden="true">{{ stats.needs_review }}</span>
+    <span class="plate plate-y" aria-hidden="true">{{ stats.needs_review }}</span>
+  </span>
+  <div class="words">
+    <h1 id="headline">
+      {%- if stats.needs_review == 1 -%}place needs your eyes.
+      {%- elif stats.needs_review -%}places need your eyes.
+      {%- else -%}Nothing needs you right now.{%- endif -%}
+    </h1>
+    <p class="sub" id="subhead">
+      {% if running %}
+        The crawler is working through the list. Anything it can confirm on its own
+        goes straight into the database; you only ever see what it cannot.
+      {% else %}
+        The crawler is paused. Nothing new comes in until you start it again.
+      {% endif %}
+    </p>
+    <div class="acts">
+      {% if stats.needs_review %}
+      <a class="btn btn-primary" href="/review">Start reviewing</a>
+      {% else %}
+      <a class="btn btn-primary" href="/record">See the record</a>
+      {% endif %}
+      <button class="btn btn-secondary" data-action="start" id="btn-start" {% if running %}hidden{% endif %}
+              data-tip="Picks up exactly where it left off.">Start the crawler</button>
+      <button class="btn btn-secondary" data-action="pause" id="btn-pause" {% if not running %}hidden{% endif %}
+              data-tip="Stops after the place it is on. Nothing already collected is lost.">Pause the crawler</button>
+    </div>
+    <p class="hint warnline" id="warn-line" {% if not worker.warning %}hidden{% endif %}>{{ worker.warning }}</p>
+    {% if blockers and blockers[0].id != 'seed' %}
+    <p class="hint warnline">{{ blockers[0].detail }} <a href="{{ blockers[0].href }}">{{ blockers[0].action }}</a></p>
     {% endif %}
   </div>
-</section>
-{% endif %}
+</div>
 
-{% if not blockers or blockers[0].id != 'seed' %}
-<section class="panel start-card">
-  <div class="start-head">
-    <div>
-      <h1 id="collect-line">{{ collecting }}</h1>
-      <p class="lede" id="next-line">
-        {% if running %}
-          {% if next_up %}Next: {{ next_up|lower }}.{% else %}Working through the list.{% endif %}
-        {% else %}
-          Press start and it keeps going on its own: it picks the next place, finds the
-          official page, reads it, checks the answer, and files it.
-        {% endif %}
-      </p>
-    </div>
-    <div class="start-btn">
-      <button class="primary big" data-action="start" id="btn-start" {% if running %}hidden{% endif %}>Start collecting</button>
-      <button class="big" data-action="pause" id="btn-pause" {% if not running %}hidden{% endif %}>Pause</button>
-    </div>
+<div class="figures">
+  <div data-tip="Counties and cities where at least one work item has finished and been written to the database.">
+    <div class="k">Researched</div>
+    <div class="v">{% if progress %}{{ "{:,}".format(progress.juris_done) }} <small>of {{ "{:,}".format(progress.juris_total) }}</small>{% else %}—{% endif %}</div>
   </div>
-  <p class="hint warnline" id="warn-line" {% if not worker.warning %}hidden{% endif %}>{{ worker.warning }}</p>
-</section>
-{% endif %}
+  <div data-tip="Work items finished since 6pm yesterday. These went into the database without you.">
+    <div class="k">Published since last night</div>
+    <div class="v" id="stat-published">{{ "{:,}".format(published_recent) }}</div>
+  </div>
+  <div class="flagged" data-tip="Everything the automatic check could not confirm. This is your whole job here.">
+    <div class="k">Waiting on you</div>
+    <div class="v" id="stat-review">{{ stats.needs_review }}</div>
+  </div>
+</div>
 
 {% if progress %}
-<section class="panel progress-panel">
-  <div class="progressbar"><div class="progressbar-fill" id="progress-fill" style="width: {{ progress.pop_pct }}%"></div></div>
-  <p class="hint" id="progress-line">
-    Records cover <strong>{{ progress.pop_pct }}%</strong> of the US population
-    ({{ "{:,}".format(progress.juris_done) }} of {{ "{:,}".format(progress.juris_total) }} counties and cities finished,
-    {{ progress.states_done }} of {{ progress.states_total }} states' rules confirmed).
+<div class="coverage">
+  <div class="head">
+    <div style="display:flex;align-items:baseline;gap:10px">
+      <span class="pct" id="progress-pct">{{ progress.pop_pct }}%</span>
+      <span class="of" id="progress-of">of the country's population covered</span>
+    </div>
+    <span class="left" id="progress-left">{{ "{:,}".format(progress.juris_total - progress.juris_done) }} places to go</span>
+  </div>
+  <div class="bar"><span id="progress-fill" style="width: {{ progress.pop_pct }}%"></span></div>
+  <p class="note" id="progress-line">
+    {{ "{:,}".format(progress.juris_done) }} of {{ "{:,}".format(progress.juris_total) }} counties and cities finished ·
+    {{ progress.states_done }} of {{ progress.states_total }} states' rules confirmed ·
+    {{ "{:,}".format(week.published) }} finished in the last seven days.
   </p>
-</section>
+</div>
 {% endif %}
 
-<section class="stats three">
-  <article><span class="k">Tax records</span><strong id="stat-instruments">{{ stats.instruments }}</strong>
-    <span class="k dim">rates and caps on file</span></article>
-  <article><span class="k">Auto-verified</span><strong id="stat-verified">{{ stats.auto_verified }}</strong>
-    <span class="k dim">passed a second check</span></article>
-  <article class="{{ 'flagged' if stats.needs_review else '' }}">
-    <span class="k">Needs you</span><strong id="stat-review">{{ stats.needs_review }}</strong>
-    <span class="k dim">{% if stats.needs_review %}<a href="/review">open the list</a>{% else %}nothing waiting{% endif %}</span></article>
+<section class="panel">
+  <h2 class="kicker">Waiting on you</h2>
+  <ul class="inbox">
+    {% for row in inbox %}
+    <li>
+      <span class="dot {{ 'flag' if row.tone=='flag' else ('go' if row.tone=='go' else '') }}"></span>
+      <div class="what">
+        <div class="title">{{ row.title }}</div>
+        <div class="why">{{ row.why }}</div>
+      </div>
+      {% if row.when %}<span class="when">{{ row.when }}</span>{% endif %}
+      <a class="btn btn-secondary" href="{{ row.href }}">{{ row.cta }}</a>
+    </li>
+    {% else %}
+    <li class="empty">Nothing. The crawler and the automatic check handled everything that came in.</li>
+    {% endfor %}
+  </ul>
 </section>
 
 <section class="panel">
-  <h2>Anything wrong</h2>
-  <p class="hint">Failures, and anything the second check flagged. Everything else was filed without you.</p>
-  <ul class="activity" id="activity-list"><li class="dim">Loading…</li></ul>
+  <div style="display:flex;align-items:baseline;gap:10px">
+    <h2 class="kicker">While you were away</h2>
+    <span style="font-size:12px;opacity:.4">last 48 hours</span>
+  </div>
+  <ul class="timeline" id="timeline">
+    {% for ev in timeline %}
+    <li>
+      <span class="dot {{ ev.tone }}"></span>
+      <div class="text">{% if ev.href %}<a href="{{ ev.href }}">{{ ev.text }}</a>{% else %}{{ ev.text }}{% endif %}</div>
+      <div class="time">{{ ev.time }}</div>
+    </li>
+    {% else %}
+    <li><div class="text dim">Nothing has run yet.</div></li>
+    {% endfor %}
+  </ul>
 </section>
 
-<details class="panel adv">
-  <summary>Do something specific instead</summary>
-  <p class="hint">The collector handles all of this on its own. These are here for when you want one thing now.</p>
-  <div class="row">
-    <button data-action="step">Run the next step now</button>
-    <div class="burst">
-      <input type="number" id="burst-size" min="1" max="500" value="{{ settings.burst_size }}">
-      <button data-action="burst">Research this many places now</button>
+<details class="adv">
+  <summary>Occasional things — add a state, load the free bulk files</summary>
+  <div class="body">
+    <div class="split">
+      <div>
+        <h3 style="font-size:18px;margin:0 0 5px">Add a state to the list</h3>
+        <p class="hint" style="margin:0 0 14px">Queues every county and city in that state. The crawler adds work on its own; this only jumps the queue.</p>
+        <form id="plan-form" class="row">
+          <div class="field" style="flex:1;min-width:150px">
+            <label for="plan-states">States <span class="dim">two-letter codes</span></label>
+            <input id="plan-states" name="states" class="input" placeholder="OH MI" required>
+          </div>
+          <input type="hidden" name="kinds" value="county,place,state">
+          <input type="hidden" name="categories" value="{{ settings.filter_categories }}">
+          <button class="btn btn-primary" type="submit">Add</button>
+        </form>
+      </div>
+      <div>
+        <h3 style="font-size:18px;margin:0 0 5px">Free head start
+          <span class="setup info" data-tip="Official government bulk files. They fill thousands of rates at once — no crawling, no AI cost, nothing to review.">&#9432;</span>
+        </h3>
+        <p class="hint" style="margin:0 0 14px">Official files that fill rates in without crawling or paying for AI.</p>
+        <div class="stack" style="align-items:flex-start">
+          <button type="button" class="btn btn-secondary" data-action="sst">Load published sales tax files</button>
+          <button type="button" class="btn btn-secondary" data-action="cog">Load Census of Governments</button>
+        </div>
+      </div>
     </div>
+
+    <div class="row" style="margin-top:26px">
+      <button type="button" class="btn btn-secondary" data-action="step"
+              data-tip="{{ next_up or 'Runs whatever autopilot would do next.' }}">Run the next step now</button>
+      <div class="burst">
+        <input type="number" id="burst-size" min="1" max="500" value="{{ settings.burst_size }}" aria-label="How many places">
+        <button type="button" class="btn btn-secondary" data-action="burst">Research this many places now</button>
+      </div>
+      <button type="button" class="btn btn-secondary" data-action="export">Export the database to CSV</button>
+    </div>
+    {% if next_up %}<p class="hint" style="margin-top:12px">Next on its own: {{ next_up|lower }}.</p>{% endif %}
   </div>
-  <div class="row" style="margin-top:.6rem">
-    <a class="btn" href="/queue">See the work list</a>
-    <a class="btn" href="/runs">See what it has been doing</a>
-    <a class="btn" href="/settings">Change how it runs</a>
-  </div>
-  <table style="margin-top:.8rem">
-    <thead><tr><th>Recent run</th><th>What</th><th class="num">Places</th><th class="num">Records</th><th>Started</th></tr></thead>
-    <tbody>
-      {% for r in recent %}
-      <tr>
-        <td><a href="/runs?run_id={{ r.id }}">#{{ r.id }}</a></td>
-        <td>{{ r.mode }} <span class="tag" data-v="{{ r.status }}">{{ r.status }}</span></td>
-        <td class="num">{{ r.items_claimed }}</td>
-        <td class="num">{{ r.findings_written }}</td>
-        <td class="ts">{{ (r.started_at or "")[:16] }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="5" class="dim">Nothing yet.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
 </details>
+{% endif %}
 {% endblock %}

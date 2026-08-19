@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}The record{% endblock %}
+{% block body %}
+
+<h1 class="page-title">Every place we track</h1>
+<p class="lede">What we hold, where it stands, and when we last looked. One row per place and tax.</p>
+
+<div class="chips">
+  {% for c in view.chips %}
+  <a href="/record?filter={{ c.key }}{% if q %}&amp;q={{ q }}{% endif %}" class="{{ 'on' if c.on else '' }}">
+    {{ c.label }} <span class="n">{{ "{:,}".format(c.count) }}</span>
+  </a>
+  {% endfor %}
+</div>
+
+{% if q %}
+<p class="hint" style="margin-top:16px">Searching for “{{ q }}”. <a href="/record?filter={{ filter_key }}">Clear</a></p>
+{% endif %}
+
+<table class="table">
+  <thead>
+    <tr>
+      <th>Place</th><th>Tax</th><th>Rate on file</th><th>Where it stands</th><th>Last checked</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in view.places %}
+    <tr>
+      <td>
+        <div class="name">{{ p.name }}</div>
+        <div class="sub">{{ p.meta }}</div>
+      </td>
+      <td>{{ p.tax }}</td>
+      <td style="font-variant-numeric:tabular-nums">{{ p.rate }}</td>
+      <td><span class="tag" data-v="{{ p.status }}" data-tip="{{ p.tip }}">{{ p.standing }}</span></td>
+      <td class="ts">{{ p.checked }}</td>
+      <td style="text-align:right">
+        {% if p.status == 'needs_review' %}
+        <a class="btn btn-ghost" href="/review">Review</a>
+        {% else %}
+        <a class="btn btn-ghost" href="/manual?geoid={{ p.geoid }}&amp;category={{ p.category }}">Open</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="dim">Nothing here yet. The crawler adds places as it works.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="pager">
+  <p>
+    {% if view.total %}
+    Showing {{ "{:,}".format(view.offset + 1) }}–{{ "{:,}".format(view.offset + view.showing) }}
+    of {{ "{:,}".format(view.total) }}.
+    {% else %}Nothing to show.{% endif %}
+  </p>
+  <div class="btns">
+    <a class="btn btn-secondary {{ 'disabled' if view.page <= 1 else '' }}"
+       href="/record?filter={{ filter_key }}&amp;page={{ view.page - 1 }}{% if q %}&amp;q={{ q }}{% endif %}"
+       {% if view.page <= 1 %}aria-disabled="true" style="opacity:.45;pointer-events:none"{% endif %}>Previous</a>
+    <a class="btn btn-secondary"
+       href="/record?filter={{ filter_key }}&amp;page={{ view.page + 1 }}{% if q %}&amp;q={{ q }}{% endif %}"
+       {% if view.page >= view.pages %}aria-disabled="true" style="opacity:.45;pointer-events:none"{% endif %}>Next</a>
+  </div>
+</div>
+{% endblock %}
