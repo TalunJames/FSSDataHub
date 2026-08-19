@@ -7,7 +7,7 @@
     <p class="lede">What is in the database, and which parts are still empty. An empty table here is a gap in coverage, never a finding.</p>
   </div>
   <div class="row" style="flex:none">
-    <button data-action="export">Export to CSV</button>
+    <button type="button" class="btn btn-secondary" data-action="export">Export to CSV</button>
   </div>
 </header>
 
@@ -27,7 +27,7 @@
   <p class="hint">Taxes on file with an expiration date inside the next three years. This is the list that says who has to go back to voters, and when.</p>
   {% if sunset %}
   <div class="scroll">
-  <table>
+  <table class="table">
     <thead><tr><th>State</th><th>Place</th><th>Tax</th><th class="num">Rate</th><th>Expires</th><th class="num">Days</th><th class="num">Past measures</th><th class="num">Best yes</th></tr></thead>
     <tbody>
       {% for r in sunset %}
@@ -53,7 +53,7 @@
   <p class="hint">Revenue measures that failed within eight points of their threshold, last six years.</p>
   {% if near_miss %}
   <div class="scroll">
-  <table>
+  <table class="table">
     <thead><tr><th>State</th><th>Place</th><th>Date</th><th>Measure</th><th>Kind</th><th class="num">Yes</th><th class="num">Needed</th><th class="num">Margin</th></tr></thead>
     <tbody>
       {% for r in near_miss %}
@@ -77,7 +77,7 @@
   <p class="hint">Where state law allows a higher rate than the jurisdiction currently levies. Largest places first.</p>
   {% if headroom %}
   <div class="scroll">
-  <table>
+  <table class="table">
     <thead><tr><th>State</th><th>Place</th><th>Tax</th><th class="num">Cap</th><th class="num">Levied</th><th class="num">Room</th></tr></thead>
     <tbody>
       {% for r in headroom %}
@@ -102,7 +102,7 @@
   <p class="hint">A rate went up or was extended, in a state where that normally needs voter approval, and we have not found the measure. Each row is a missing piece of election history.</p>
   {% if gap %}
   <div class="scroll">
-  <table>
+  <table class="table">
     <thead><tr><th>State</th><th>Place</th><th>Tax</th><th>Change</th><th class="num">From</th><th class="num">To</th><th>Period</th></tr></thead>
     <tbody>
       {% for r in gap %}
@@ -124,7 +124,7 @@
   <div class="panel">
     <h2>Election history coverage</h2>
     <p class="hint">How much of the ballot-measure record we claim to have. Every county starts at <code>none</code> so silence is never mistaken for "they never tried".</p>
-    <table>
+    <table class="table">
       <thead><tr><th>Claim</th><th class="num">Scopes</th></tr></thead>
       <tbody>
         {% for r in coverage_rows %}
@@ -139,7 +139,7 @@
   <div class="panel">
     <h2>Progress by state</h2>
     <div class="scroll tall">
-    <table>
+    <table class="table">
       <thead><tr><th>State</th><th class="num">Done</th><th class="num">Needs you</th><th class="num">To do</th><th class="num">Stuck</th></tr></thead>
       <tbody>
         {% for r in by_state %}

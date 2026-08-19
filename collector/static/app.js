@@ -1,9 +1,13 @@
+/* The collector's front end. One file: the shell (tooltips, toast, help,
+   status polling), the review deck, setup, and the older forms that still
+   post JSON. Nothing here holds state the server does not already have. */
+
 function toast(msg, ok) {
   const el = document.getElementById("toast");
   if (!el) return;
   el.hidden = false;
   el.textContent = msg;
-  el.style.borderLeftColor = ok === false ? "#8a2e24" : "#b08948";
+  el.classList.toggle("bad", ok === false);
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { el.hidden = true; }, 4200);
 }
@@ -27,103 +31,128 @@ async function api(path, body, method) {
   return data;
 }
 
-function fillInstruments(category) {
-  const sel = document.getElementById("f-instrument");
-  if (!sel || !window.INSTRUMENTS) return;
-  const codes = window.INSTRUMENTS[category] || [];
-  sel.innerHTML = codes.map((c) => `<option value="${c}">${c}</option>`).join("");
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
+
+/* ── tooltips ───────────────────────────────────────────────────────── */
+
+const tip = document.getElementById("tip");
+document.addEventListener("mouseover", (ev) => {
+  if (!tip) return;
+  const el = ev.target.closest && ev.target.closest("[data-tip]");
+  if (!el || !el.getAttribute("data-tip")) { tip.classList.remove("on"); return; }
+  const r = el.getBoundingClientRect();
+  tip.textContent = el.getAttribute("data-tip");
+  tip.style.left = Math.max(12, Math.min(r.left, window.innerWidth - 300)) + "px";
+  tip.style.top = (r.bottom + 8) + "px";
+  tip.classList.add("on");
+});
+
+/* ── the help drawer ────────────────────────────────────────────────── */
+
+const help = document.getElementById("help");
+document.getElementById("help-open")?.addEventListener("click", () => help?.classList.toggle("open"));
+document.getElementById("help-close")?.addEventListener("click", () => help?.classList.remove("open"));
+
+/* ── the review deck: one place at a time ───────────────────────────── */
+
+const deck = {
+  cards: Array.from(document.querySelectorAll(".review-item")),
+  at: 0,
+};
+
+function showCard() {
+  deck.cards.forEach((card, i) => { card.hidden = i !== deck.at; });
+  const dots = document.querySelectorAll("#review-dots span");
+  dots.forEach((d, i) => {
+    d.className = i < deck.at ? "done" : (i === deck.at ? "here" : "");
+  });
+  const count = document.getElementById("review-count");
+  const done = deck.at >= deck.cards.length;
+  if (count) {
+    count.textContent = done ? "all clear" : (deck.at + 1) + " of " + deck.cards.length;
+  }
+  const clear = document.getElementById("all-clear");
+  if (clear) clear.hidden = !done;
+}
+
+async function decide(status) {
+  const card = deck.cards[deck.at];
+  if (!card) return;
+  const words = {
+    complete: "published", pending: "sent back to the crawler",
+    no_data: "recorded as having no such tax",
+  };
+  try {
+    await api("/api/review", {
+      geoid: card.dataset.geoid,
+      category: card.dataset.category,
+      status,
+    });
+    toast(card.dataset.name + " " + (words[status] || status) + ".");
+    deck.at += 1;
+    showCard();
+  } catch (e) { toast(e.message, false); }
+}
+
+if (deck.cards.length) {
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.matches("input, textarea, select")) return;
+    if (ev.key === "1") decide("complete");
+    else if (ev.key === "2") decide("pending");
+    else if (ev.key === "3") decide("no_data");
+  });
+}
+
+/* ── setup: the three plain choices map onto the real settings ──────── */
 
 function formToSettings(form) {
   const data = {};
   for (const el of form.elements) {
     if (!el.name) continue;
     if (el.type === "checkbox") data[el.name] = el.checked ? "1" : "0";
+    else if (el.type === "radio") { if (el.checked) data[el.name] = el.value; }
     else data[el.name] = el.value;
+  }
+  // "When it crawls" is one question on screen and three settings underneath.
+  const when = data.when_mode;
+  delete data.when_mode;
+  if (when === "overnight") {
+    data.schedule_enabled = "1";
+    data.continuous_enabled = "0";
+    if (!data.schedule_kind) data.schedule_kind = "daily";
+  } else if (when === "always") {
+    data.continuous_enabled = "1";
+    data.schedule_enabled = "0";
+  } else if (when === "manual") {
+    data.continuous_enabled = "0";
+    data.schedule_enabled = "0";
   }
   return data;
 }
 
-document.addEventListener("click", async (ev) => {
-  const btn = ev.target.closest("[data-action]");
-  if (btn) {
-    const act = btn.dataset.action;
-    try {
-      if (act === "start") {
-        const r = await api("/api/start", {});
-        toast(r.ready ? "Collecting. Leave this running."
-                      : "Setting up first — this takes a few minutes.");
-        setStartButtons(true);
-      } else if (act === "pause") {
-        await api("/api/pause", {});
-        toast("Paused. Nothing new will be collected.");
-        setStartButtons(false);
-      } else if (act === "step") {
-        const r = await api("/api/autopilot/step", {});
-        toast(r.label || "nothing to do");
-      } else if (act === "export") {
-        const r = await api("/api/export", {});
-        toast("Exported CSVs to " + r.dir);
-      } else if (act === "burst") {
-        const size = Number(document.getElementById("burst-size").value || 20);
-        await api("/api/crawl/burst", { size });
-        toast("Burst started (" + size + " items)");
-      } else if (act === "stop") {
-        await api("/api/crawl/stop", {});
-        toast("Stop requested");
-      } else if (act === "init") {
-        const r = await api("/api/init", {});
-        toast("Schema ready at " + r.path);
-      } else if (act === "seed") {
-        await api("/api/seed", {
-          counties_only: document.getElementById("counties-only")?.checked,
-          include_mcd: document.getElementById("include-mcd")?.checked,
-        });
-        toast("Seeding in the background — Census bulk files, a few minutes");
-      } else if (act === "sst") {
-        await api("/api/bulk/sst", { states: document.getElementById("sst-states")?.value || "" });
-        toast("SST fetch started — rate files for member states");
-      } else if (act === "cog") {
-        await api("/api/bulk/cog", {});
-        toast("Census of Governments download started");
-      } else if (act === "statutes") {
-        const st = (document.getElementById("statute-state")?.value || "").trim();
-        if (st.length !== 2) throw new Error("Enter a two-letter state code");
-        await api("/api/statutes/fetch", { state: st });
-        toast("Statute snapshot for " + st.toUpperCase() + " started");
-      } else if (act === "test-provider") {
-        const form = document.getElementById("settings-form");
-        const out = document.getElementById("provider-test-result");
-        if (form) await api("/api/settings", formToSettings(form));
-        if (out) out.textContent = "Testing…";
-        const r = await api("/api/provider/test", {});
-        if (out) out.textContent = r.ok
-          ? "✓ " + r.provider + " (" + r.model + ") answered: " + r.response
-          : "✗ " + (r.error || "test failed");
-        toast(r.ok ? "Key works" : (r.error || "test failed"), r.ok);
-      }
-    } catch (e) { toast(e.message, false); }
-  }
-  const rev = ev.target.closest("[data-review]");
-  if (rev) {
-    try {
-      await api("/api/review", {
-        geoid: rev.dataset.geoid,
-        category: rev.dataset.category,
-        status: rev.dataset.review,
-      });
-      toast(rev.dataset.geoid + " → " + rev.dataset.review);
-      rev.closest(".review-card")?.remove();
-    } catch (e) { toast(e.message, false); }
-  }
-  const sug = ev.target.closest("#j-results li");
-  if (sug) {
-    document.getElementById("f-geoid").value = sug.dataset.geoid;
-    const u = document.getElementById("u-geoid");
-    if (u) u.value = sug.dataset.geoid;
-    document.getElementById("j-results").hidden = true;
-  }
+function showProviderBlock() {
+  const chosen = document.querySelector("input[name=provider]:checked")?.value || "none";
+  document.querySelectorAll("[data-provider-block]").forEach((el) => {
+    el.style.display = el.dataset.providerBlock === chosen ? "" : "none";
+  });
+}
+document.querySelectorAll("input[name=provider]").forEach(
+  (el) => el.addEventListener("change", showProviderBlock));
+showProviderBlock();
+
+document.getElementById("settings-form")?.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    await api("/api/settings", formToSettings(ev.target));
+    toast("Saved.");
+  } catch (e) { toast(e.message, false); }
 });
+
+/* ── buttons that do one thing ──────────────────────────────────────── */
 
 function setStartButtons(running) {
   const start = document.getElementById("btn-start");
@@ -132,66 +161,78 @@ function setStartButtons(running) {
   if (pause) pause.hidden = !running;
 }
 
-document.getElementById("toggle-continuous")?.addEventListener("change", async (ev) => {
+document.addEventListener("click", async (ev) => {
+  const rev = ev.target.closest("[data-review]");
+  if (rev) { decide(rev.dataset.review); return; }
+
+  const btn = ev.target.closest("[data-action]");
+  if (!btn) return;
+  const act = btn.dataset.action;
   try {
-    await api("/api/crawl/toggle", { enabled: ev.target.checked });
-    toast(ev.target.checked ? "Continuous crawl on" : "Continuous crawl off");
-  } catch (e) { toast(e.message, false); ev.target.checked = !ev.target.checked; }
+    if (act === "start") {
+      const r = await api("/api/start", {});
+      toast(r.ready ? "Collecting. Leave it running."
+                    : "Setting up first — this takes a few minutes.");
+      setStartButtons(true);
+    } else if (act === "pause") {
+      await api("/api/pause", {});
+      toast("Paused. Nothing new will be collected.");
+      setStartButtons(false);
+    } else if (act === "step") {
+      const r = await api("/api/autopilot/step", {});
+      toast(r.label || "Nothing to do.");
+    } else if (act === "export") {
+      const r = await api("/api/export", {});
+      toast("Exported CSVs to " + r.dir);
+    } else if (act === "burst") {
+      const size = Number(document.getElementById("burst-size").value || 20);
+      await api("/api/crawl/burst", { size });
+      toast("Working through " + size + " places now.");
+    } else if (act === "stop") {
+      await api("/api/crawl/stop", {});
+      toast("Stop requested.");
+    } else if (act === "init") {
+      const r = await api("/api/init", {});
+      toast("Schema ready at " + r.path);
+    } else if (act === "seed") {
+      await api("/api/seed", {
+        counties_only: document.getElementById("counties-only")?.checked,
+        include_mcd: document.getElementById("include-mcd")?.checked,
+      });
+      toast("Setting up from the Census files — a few minutes.");
+    } else if (act === "sst") {
+      await api("/api/bulk/sst", { states: document.getElementById("sst-states")?.value || "" });
+      toast("Loading published sales tax files.");
+    } else if (act === "cog") {
+      await api("/api/bulk/cog", {});
+      toast("Loading the Census of Governments.");
+    } else if (act === "statutes") {
+      const st = (document.getElementById("statute-state")?.value || "").trim();
+      if (st.length !== 2) throw new Error("Enter a two-letter state code");
+      await api("/api/statutes/fetch", { state: st });
+      toast("Fetching " + st.toUpperCase() + " statutes.");
+    } else if (act === "test-provider") {
+      const form = document.getElementById("settings-form");
+      const out = document.getElementById("provider-test-result");
+      if (form) await api("/api/settings", formToSettings(form));
+      if (out) out.textContent = "Testing…";
+      const r = await api("/api/provider/test", {});
+      if (out) out.textContent = r.ok
+        ? "✓ " + r.provider + " (" + r.model + ") answered: " + r.response
+        : "✗ " + (r.error || "test failed");
+      toast(r.ok ? "It works." : (r.error || "Test failed"), r.ok);
+    }
+  } catch (e) { toast(e.message, false); }
 });
+
+/* ── the older forms ────────────────────────────────────────────────── */
 
 document.getElementById("plan-form")?.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);
   try {
     const r = await api("/api/plan", Object.fromEntries(fd.entries()));
-    toast("Created " + r.created + " work items");
-  } catch (e) { toast(e.message, false); }
-});
-
-document.getElementById("settings-form")?.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  try {
-    await api("/api/settings", formToSettings(ev.target));
-    toast("Settings saved");
-  } catch (e) { toast(e.message, false); }
-});
-
-document.getElementById("finding-form")?.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const f = ev.target;
-  const g = (name) => f[name]?.value;
-  const num = (name) => {
-    const v = g(name);
-    return v === "" || v == null ? null : Number(v);
-  };
-  const finding = {
-    geoid: g("geoid"),
-    category: g("category"),
-    instrument_code: g("instrument_code"),
-    label: g("label") || null,
-    status: g("status"),
-    rate_value: num("rate_value"),
-    rate_unit: g("rate_unit") || null,
-    rate_basis: g("rate_basis") || null,
-    statute_cite: g("statute_cite") || null,
-    effective_date: g("effective_date") || null,
-    expiration_date: g("expiration_date") || null,
-    fiscal_year: num("fiscal_year"),
-    voter_approval_required: g("voter_approval_required") || null,
-    confidence: g("confidence"),
-    extraction_method: "manual",
-    notes: g("notes") || null,
-    source: {
-      url: g("source_url"),
-      name: g("source_name") || g("source_url"),
-      source_type: g("source_type"),
-      authority_tier: Number(g("authority_tier")),
-    },
-  };
-  try {
-    const r = await api("/api/ingest", { finding, researcher: "manual" });
-    toast("Wrote " + r.written + " finding(s); " + r.rejected + " rejected");
-    if (r.errors?.length) toast(r.errors[0], false);
+    toast("Added " + r.created + " places to the list.");
   } catch (e) { toast(e.message, false); }
 });
 
@@ -233,93 +274,81 @@ document.getElementById("url-form")?.addEventListener("submit", async (ev) => {
   } catch (e) { toast(e.message, false); }
 });
 
-const jSearch = document.getElementById("j-search");
-if (jSearch) {
-  let t;
-  jSearch.addEventListener("input", () => {
-    clearTimeout(t);
-    t = setTimeout(async () => {
-      const q = jSearch.value.trim();
-      const box = document.getElementById("j-results");
-      if (q.length < 2) { box.hidden = true; return; }
-      const rows = await api("/api/jurisdictions?q=" + encodeURIComponent(q));
-      box.hidden = rows.length === 0;
-      box.innerHTML = rows.map((r) =>
-        `<li data-geoid="${r.geoid}">${r.name} <span class="dim">${r.state_usps} ${r.kind} · ${r.geoid}</span></li>`
-      ).join("");
-    }, 200);
-  });
-}
+/* ── search: "/" puts the cursor in the box ─────────────────────────── */
 
-document.getElementById("f-category")?.addEventListener("change", (ev) => fillInstruments(ev.target.value));
-fillInstruments(document.getElementById("f-category")?.value);
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") help?.classList.remove("open");
+  if (ev.key !== "/" || ev.metaKey || ev.ctrlKey) return;
+  if (ev.target.matches("input, textarea, select")) return;
+  const box = document.getElementById("top-search");
+  if (box) { ev.preventDefault(); box.focus(); box.select(); }
+});
+
+/* ── the status poll ────────────────────────────────────────────────── */
+
+function num(n) { return Number(n || 0).toLocaleString(); }
 
 async function poll() {
   try {
     const s = await api("/api/status");
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-    set("stat-jurisdictions", s.stats.jurisdictions);
-    set("stat-work", s.stats.work_items);
-    set("stat-pending", s.stats.pending);
+
     set("stat-review", s.stats.needs_review);
-    set("stat-done", s.stats.done);
-    set("stat-verified", s.stats.auto_verified);
-    set("stat-instruments", s.stats.instruments);
-    set("stat-pages", s.stats.pages);
-    set("collect-line", s.collecting);
     set("rail-state", s.worker.state === "running" ? "collecting" : s.worker.state);
     setStartButtons(s.running);
 
+    const badge = document.getElementById("rail-badge");
+    if (badge) {
+      badge.textContent = s.stats.needs_review;
+      badge.hidden = !s.stats.needs_review;
+    }
+    const open = document.getElementById("open-count");
+    if (open) {
+      open.querySelectorAll("span").forEach((el) => { el.textContent = s.stats.needs_review; });
+      const line = document.getElementById("headline");
+      if (line) {
+        line.textContent = s.stats.needs_review === 0
+          ? "Nothing needs you right now."
+          : (s.stats.needs_review === 1 ? "place needs your eyes." : "places need your eyes.");
+      }
+    }
+    if (s.tally) {
+      set("tally-fig", num(s.tally.done) + " / " + num(s.tally.total));
+      set("tally-pct", s.tally.pct + "%");
+      const bar = document.getElementById("tally-bar");
+      if (bar) bar.style.width = s.tally.pct + "%";
+    }
     if (s.progress) {
       const fill = document.getElementById("progress-fill");
       if (fill) fill.style.width = s.progress.pop_pct + "%";
-      const line = document.getElementById("progress-line");
-      if (line) {
-        line.innerHTML = "Records cover <strong>" + s.progress.pop_pct +
-          "%</strong> of the US population (" +
-          s.progress.juris_done.toLocaleString() + " of " +
-          s.progress.juris_total.toLocaleString() +
-          " counties and cities finished, " + s.progress.states_done + " of " +
-          s.progress.states_total + " states' rules confirmed).";
-      }
+      set("progress-pct", s.progress.pop_pct + "%");
+      set("progress-left", num(s.progress.juris_total - s.progress.juris_done) + " places to go");
     }
-
+    const pulse = document.getElementById("pulse");
+    if (pulse) {
+      pulse.classList.toggle("live", s.worker.state === "running");
+      pulse.setAttribute("data-tip", s.collecting || "");
+    }
     const warn = document.getElementById("warn-line");
     if (warn) {
       warn.textContent = s.warning || "";
       warn.hidden = !s.warning;
     }
-    const pulse = document.querySelector(".pulse");
-    if (pulse) pulse.classList.toggle("live", s.worker.state === "running");
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* the page keeps whatever it last showed */ }
 }
-if (document.getElementById("collect-line") || document.getElementById("stat-pending")) {
-  setInterval(poll, 2500);
-}
+setInterval(poll, 4000);
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
-async function pollActivity() {
-  const box = document.getElementById("activity-list");
+async function pollTimeline() {
+  const box = document.getElementById("timeline");
   if (!box) return;
   try {
-    const events = await api("/api/activity?limit=20");
-    if (!events.length) {
-      box.innerHTML = '<li class="dim">Nothing to report — no failures, nothing flagged.</li>';
-      return;
-    }
+    const events = await api("/api/timeline?limit=8");
+    if (!events.length) return;
     box.innerHTML = events.map((e) =>
-      `<li class="act ${escapeHtml(e.kind)}"><a href="${escapeHtml(e.href)}">${escapeHtml(e.title)}</a>` +
-      (e.detail ? ` <span class="dim">${escapeHtml(e.detail)}</span>` : "") +
-      ` <span class="dim ts">${escapeHtml(e.ts || "")}</span></li>`
+      `<li><span class="dot ${escapeHtml(e.tone)}"></span>` +
+      `<div class="text">${e.href ? `<a href="${escapeHtml(e.href)}">${escapeHtml(e.text)}</a>` : escapeHtml(e.text)}</div>` +
+      `<div class="time">${escapeHtml(e.time || "")}</div></li>`
     ).join("");
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* leave the rendered feed alone */ }
 }
-if (document.getElementById("activity-list")) {
-  pollActivity();
-  setInterval(pollActivity, 10000);
-}
+if (document.getElementById("timeline")) setInterval(pollTimeline, 20000);

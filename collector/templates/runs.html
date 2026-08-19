@@ -8,10 +8,10 @@
   </div>
 </header>
 
-<section class="split" style="grid-template-columns: 0.9fr 1.1fr">
+<section class="split" style="grid-template-columns: 0.85fr 1.15fr;margin-top:34px">
   <div class="panel">
     <h2>Runs</h2>
-    <table>
+    <table class="table">
       <thead><tr><th>ID</th><th>Mode</th><th>Status</th><th class="num">P/F</th><th>When</th></tr></thead>
       <tbody>
         {% for r in runs %}
@@ -31,14 +31,14 @@
   <div class="stack">
     <div class="panel">
       <h2>Pages{% if active %} · run {{ active }}{% endif %}</h2>
-      <table>
+      <table class="table">
         <thead><tr><th>HTTP</th><th>Title / URL</th><th class="num">Chars</th></tr></thead>
         <tbody>
           {% for p in pages %}
           <tr>
             <td class="num">{{ p.http_status or p.error or '—' }}</td>
             <td>
-              <div style="color:var(--fg)">{{ p.title or '—' }}</div>
+              <div>{{ p.title or '—' }}</div>
               <a class="dim" href="{{ p.final_url or p.url }}" target="_blank" rel="noopener">{{ p.url }}</a>
               {% if p.robots_allowed == 0 %}<span class="pill">robots</span>{% endif %}
             </td>
