@@ -1,8 +1,8 @@
 # Collector (TrueNAS SCALE)
 
 A web app that lives next to `taxdb` and fills it without being told what to do
-next. Add an AI key and press **Start collecting**. There is one button on the
-home page because there is one decision: run, or pause.
+next. Add an AI key and press **Start the crawler**. There is one button on the
+Today page because there is one decision: run, or pause.
 
 It populates the database three ways:
 
@@ -38,7 +38,7 @@ Guards, all visible in the UI:
 - Rows a bulk file already answered are filed as done, not queued for review.
 - Records older than `refresh_days` go back in the queue on their own.
 
-Every extraction is re-read by a **second checker** — deterministic sanity checks plus a second, skeptical model pass, with a different prompt per pass: rates are checked against their quotes, measures against their canvasses, thresholds against the statute text. Items that pass are marked `complete` automatically; only flagged items land under **Needs you**, with the reason attached. If the checker cannot run, items fail toward review, never toward trust. Turn it off under **Settings → Second checker** to review everything by hand.
+Every extraction is re-read by a **second checker** — deterministic sanity checks plus a second, skeptical model pass, with a different prompt per pass: rates are checked against their quotes, measures against their canvasses, thresholds against the statute text. Items that pass are marked `complete` automatically; only flagged items land under **Review**, with the reason attached. If the checker cannot run, items fail toward review, never toward trust. Turn it off under **Setup → Double-check the AI** to review everything by hand.
 
 The mechanical checks separate **contradictions** from **concerns**, and that split is what keeps **Needs you** worth opening. A contradiction (a rate outside any plausible range for its unit, a `prohibited` status carrying a rate, a rate above its own cap, a threshold stored as a fraction, a result dated in the future) goes to a human and skips the model call — there is nothing a second opinion adds. A concern (no source quote, a quote the search could not locate, an unset source tier, no threshold on file yet) is handed to the model as context, and the model decides whether it matters. Concerns on their own never queue an item for a human.
 
@@ -66,18 +66,24 @@ to watch them run:
 ```
 
 To work one state first, use **Add a specific state to the list** on the Work
-list page. To run a bulk file by hand, use **Do it by hand** under Settings. The
+list page. To run a bulk file by hand, use **Do it by hand** under Setup. The
 crawler skips work items already filled by an adapter.
 
 ## Pages
 
 | page | what it is for |
 |---|---|
-| **Home** | Start or pause, and one line saying what is happening now |
-| **Needs you** | Only what the second check flagged, with the rows to judge it by |
-| **Add a source** | Drop the real document, or answer the questions still open |
-| **The data** | What the database holds, and which product views are still empty |
-| Work list · Activity log · Settings | The detail, out of the daily path |
+| **Today** | How many places need a person, what ran overnight, and one button: run or pause |
+| **Review** | One flagged place at a time, with the archived quote beside the number and three keys to settle it |
+| **The record** | Every place and tax we hold: the rate on file, where it stands, when we last looked |
+| **Setup** | Three questions — who reads the documents, whether a second AI checks, when it crawls. Everything else is behind one disclosure |
+| Add a source · What the database holds · Work list · Activity log | The detail, out of the daily path |
+
+The look is the **Broadsheet** design system, vendored as `static/broadsheet.css`
+from `Design/_ds/broadsheet-33f8ea22/`. Treat that file as upstream and put the
+app's own rules in `static/style.css`; both take every color, size and radius
+from the system's tokens. `collector/present.py` holds the formatting and the
+queries the screens need, so the routes stay thin.
 
 ## TrueNAS SCALE (always on)
 

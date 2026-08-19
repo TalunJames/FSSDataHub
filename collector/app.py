@@ -19,7 +19,7 @@ from taxdb.vocab import (
     WORK_STATUSES,
 )
 
-from . import autopilot, crawl, extract, intake, interview, store, worker
+from . import autopilot, crawl, extract, intake, interview, present, store, worker
 from .settings import (
     ANTHROPIC_MODELS, VALID_KINDS, VALID_PROVIDERS, VALID_SCHEDULE, VALID_SEARCH,
 )
@@ -78,10 +78,16 @@ def _ctx(request, **extra):
         settings = store.get_all(conn)
         stats = _stats(conn)
         progress = autopilot.progress(conn, settings) if stats["ready"] else None
+        week = present.week(conn)
     finally:
         conn.close()
+    user = os.environ.get("COLLECTOR_USER", "")
     ctx = {
         "request": request,
+        "week": week,
+        "user": user,
+        "user_initials": "".join(w[0] for w in user.replace(".", " ").split()[:2]).upper(),
+        "tally": _tally(progress),
         "settings": store.mask(settings),
         "stats": stats,
         "progress": progress,
@@ -109,6 +115,20 @@ def _ctx(request, **extra):
     }
     ctx.update(extra)
     return ctx
+
+
+def _tally(progress):
+    """The header's one figure: places researched out of places on file."""
+    if not progress or not progress.get("juris_total"):
+        return None
+    done = progress["juris_done"]
+    total = progress["juris_total"]
+    return {
+        "done": done,
+        "total": total,
+        "left": total - done,
+        "pct": round(100.0 * done / total, 1),
+    }
 
 
 def _stats(conn):
@@ -249,20 +269,25 @@ def _table_counts(conn):
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, _: bool = Depends(_auth)):
+    """Today: what needs a person, what ran overnight, and one button."""
     conn = store.connect()
     try:
-        recent = conn.execute(
-            "SELECT id, mode, status, items_claimed, findings_written, started_at "
-            "FROM crawl_run ORDER BY id DESC LIMIT 5").fetchall()
-        next_up = None
         settings = store.get_all(conn)
-        if _stats(conn)["ready"]:
+        stats = _stats(conn)
+        progress = autopilot.progress(conn, settings) if stats["ready"] else None
+        next_up = None
+        if stats["ready"]:
             plan = autopilot.next_action(conn, settings)
             next_up = plan[2] if plan else None
+        inbox = present.inbox(conn, stats, settings, progress)
+        timeline = present.timeline(conn)
+        published = present.published_since_last_night(conn)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "dashboard.html", _ctx(
-        request, recent=recent, next_up=next_up, nav="dash"))
+        request, next_up=next_up, inbox=inbox, timeline=timeline,
+        published_recent=published, greeting=present.greeting(settings.get("researcher")),
+        dateline=present.dateline(), nav="today"))
 
 
 @app.get("/data", response_class=HTMLResponse)
@@ -329,56 +354,27 @@ def manual_page(request: Request, geoid: str = "", category: str = "",
 
 @app.get("/review", response_class=HTMLResponse)
 def review_page(request: Request, _: bool = Depends(_auth)):
+    """One flagged place at a time, with the archived source beside it."""
     conn = store.connect()
     try:
-        rows = conn.execute(
-            "SELECT w.id, w.geoid, w.category, w.last_error, w.updated_at, "
-            "w.priority, j.name, j.state_usps, j.kind, j.population "
-            "FROM work_item w JOIN jurisdiction j ON j.geoid=w.geoid "
-            "WHERE w.status='needs_review' ORDER BY w.priority DESC LIMIT 80"
-        ).fetchall()
-        # Each pass wrote to a different table, so each needs its own view of
-        # what is waiting. Showing "no tax rows" on a threshold item told a
-        # reviewer nothing and left them no way to judge it.
-        findings, measures, framework = {}, {}, {}
-        for r in rows[:40]:
-            key = r["geoid"] + "/" + r["category"]
-            if r["category"] == ELECTIONS:
-                measures[key] = conn.execute(
-                    "SELECT b.id, b.election_date, b.measure_id_local, b.measure_class, "
-                    "b.outcome, b.pct_yes, b.threshold_required, b.margin_vs_threshold, "
-                    "b.rate_value, b.rate_unit, b.stated_purpose, b.confidence, s.url "
-                    "FROM ballot_measure b LEFT JOIN source s ON s.id=b.source_id "
-                    "WHERE b.geoid=? AND b.superseded_by IS NULL "
-                    "ORDER BY b.election_date DESC LIMIT 25", (r["geoid"],)).fetchall()
-            elif r["category"] == FRAMEWORK:
-                usps = r["state_usps"]
-                framework[key] = {
-                    "thresholds": conn.execute(
-                        "SELECT t.measure_class, t.jurisdiction_kind, "
-                        "t.purpose_restriction, t.threshold_value, t.threshold_basis, "
-                        "t.statute_cite, t.confidence, s.url FROM threshold_rule t "
-                        "LEFT JOIN source s ON s.id=t.source_id WHERE t.state_usps=? "
-                        "ORDER BY t.measure_class LIMIT 25", (usps,)).fetchall(),
-                    "grants": conn.execute(
-                        "SELECT g.category, g.instrument_code, g.jurisdiction_kind, "
-                        "g.permitted, g.max_rate, g.max_rate_unit, g.statute_cite, "
-                        "g.confidence, s.url FROM authority_grant g "
-                        "LEFT JOIN source s ON s.id=g.source_id WHERE g.state_usps=? "
-                        "ORDER BY g.category LIMIT 25", (usps,)).fetchall(),
-                }
-            else:
-                findings[key] = conn.execute(
-                    "SELECT t.id, t.instrument_code, t.status, t.rate_value, t.rate_unit, "
-                    "t.confidence, t.extraction_method, t.retrieved_at, s.url "
-                    "FROM tax_instrument t JOIN source s ON s.id=t.source_id "
-                    "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL",
-                    (r["geoid"], r["category"])).fetchall()
+        items = present.review_items(conn)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "review.html", _ctx(
-        request, rows=rows, findings=findings, measures=measures,
-        framework=framework, nav="review"))
+        request, items=items, nav="review"))
+
+
+@app.get("/record", response_class=HTMLResponse)
+def record_page(request: Request, q: str = "", filter: str = "all", page: int = 1,
+                _: bool = Depends(_auth)):
+    """Every place we track: what we hold, and when we last looked."""
+    conn = store.connect()
+    try:
+        view = present.record(conn, q=q, filt=filter, page=page)
+    finally:
+        conn.close()
+    return templates.TemplateResponse(request, "record.html", _ctx(
+        request, view=view, q=q, filter_key=filter, nav="record"))
 
 
 @app.get("/runs", response_class=HTMLResponse)
@@ -446,6 +442,7 @@ def api_status(_: bool = Depends(_auth)):
     return {
         "stats": stats,
         "progress": progress,
+        "tally": _tally(progress),
         "worker": snap,
         "collecting": _collecting_line(s, stats, snap),
         "blockers": _blockers(s, stats),
@@ -553,6 +550,16 @@ def api_activity(limit: int = 30, _: bool = Depends(_auth)):
         conn.close()
     events.sort(key=lambda e: e["ts"] or "", reverse=True)
     return events[:limit]
+
+
+@app.get("/api/timeline")
+def api_timeline(limit: int = 8, _: bool = Depends(_auth)):
+    """The 'while you were away' feed, for the home page's own refresh."""
+    conn = store.connect()
+    try:
+        return present.timeline(conn, limit=max(1, min(int(limit or 8), 30)))
+    finally:
+        conn.close()
 
 
 @app.post("/api/start")

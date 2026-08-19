@@ -7,12 +7,13 @@
     <p class="lede">Everything queued, biggest places first. The collector adds to this on its own; you do not need to.</p>
   </div>
   <div class="row" style="flex:none">
-    <a class="btn" href="/">Home</a>
+    <a class="btn btn-secondary" href="/">Home</a>
   </div>
 </header>
 
-<details class="panel adv">
+<details class="adv">
   <summary>Add a specific state to the list</summary>
+  <div class="body">
   <p class="hint">Autopilot works down the whole country by population. Use this to put one state at the front.</p>
   <form id="plan-form" class="stack">
     <label>States <span class="dim">two-letter codes, space or comma separated</span>
@@ -25,9 +26,10 @@
     <div class="row">
       <label>Minimum population <input type="number" name="min_pop" value="0"></label>
       <label>Limit <input type="number" name="limit" placeholder="all"></label>
-      <button class="primary" type="submit" style="flex:none">Add to the list</button>
+      <button class="btn btn-primary" type="submit" style="flex:none">Add to the list</button>
     </div>
   </form>
+  </div>
 </details>
 
 <form class="filters" method="get" action="/queue">
@@ -51,7 +53,7 @@
 </form>
 
 <section class="panel">
-  <table>
+  <table class="table">
     <thead>
       <tr>
         <th>GEOID</th><th>Place</th><th>Category</th><th>Status</th>
@@ -62,7 +64,7 @@
       {% for r in rows %}
       <tr>
         <td><code>{{ r.geoid }}</code></td>
-        <td><span style="color:var(--fg)">{{ r.name }}</span> <span class="dim meta">{{ r.state_usps }} · {{ r.kind }}</span></td>
+        <td>{{ r.name }} <span class="dim">{{ r.state_usps }} · {{ r.kind }}</span></td>
         <td>{{ r.category }}</td>
         <td><span class="tag" data-v="{{ r.status }}">{{ r.status }}</span></td>
         <td class="num">{{ r.priority }}</td>

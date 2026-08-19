@@ -263,7 +263,7 @@ Guards worth knowing about:
 The second checker runs on all three passes, with a different skeptic's prompt
 for each: it re-reads rates against their quotes, measures against their
 canvasses, and thresholds against the statute text. What passes is filed
-without a human. What is flagged lands under **Needs you** with the reason.
+without a human. What is flagged lands under **Review** with the reason.
 
 The mechanical checks that run first are sorted into two kinds, and the split
 is what keeps **Needs you** short. A *contradiction* — a rate outside any
@@ -298,7 +298,7 @@ These are what a brief reads. They are computed, not stored.
 | `v_measure_capture_gap` | rate changes with no election on record |
 | `v_coverage` | research progress by state, kind, and category |
 
-The collector surfaces all of these under **The data**, with an explicit note
+The collector surfaces all of these under **What the database holds**, with an explicit note
 on each empty one saying which pass fills it. An empty product view is a
 coverage gap, never a finding.
 

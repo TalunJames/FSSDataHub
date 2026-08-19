@@ -1,137 +1,183 @@
 {% extends "base.html" %}
-{% block title %}Needs you{% endblock %}
+{% block title %}Review{% endblock %}
 {% block body %}
-<header class="page">
-  <div>
-    <h1>Needs you</h1>
-    <p class="lede">Only what the second check flagged, or could not verify, lands here. Approve a row when the linked source really says that number. If it does not, send it back.</p>
-  </div>
-  <div class="row" style="flex:none">
-    <span class="tag" data-v="needs_review">{{ rows|length }} open</span>
-  </div>
-</header>
 
-{% if not rows %}
-<section class="panel"><p class="hint" style="margin:0">Queue is clear.</p></section>
-{% endif %}
-
-{% for r in rows %}
-<section class="panel review-card">
-  <header>
-    <h2>{{ r.name }} <span class="dim">{{ r.state_usps }} · {{ r.kind }} · {{ r.geoid }}</span></h2>
-    <p class="hint" style="margin:.2rem 0 0">{{ work_categories.get(r.category, r.category) if r.category in ('framework','elections') else r.category }}{% if r.population %} · pop {{ r.population }}{% endif %}
-      · <a href="/api/packet/{{ r.geoid }}?category={{ r.category }}">packet</a>
-    </p>
-  </header>
-  {% if r.last_error %}
-  <p class="hint flag-reason">⚑ {{ r.last_error }}</p>
-  {% endif %}
-  {% set key = r.geoid ~ '/' ~ r.category %}
-  {% if r.category == 'elections' %}
-    {% set recs = measures.get(key, []) %}
-    {% if recs %}
-    <div class="scroll">
-    <table>
-      <thead><tr><th>Date</th><th>Measure</th><th>Kind</th><th>Result</th><th class="num">Yes</th><th class="num">Needed</th><th class="num">Margin</th><th>Purpose</th><th>Source</th></tr></thead>
-      <tbody>
-        {% for m in recs %}
-        <tr>
-          <td>{{ m.election_date }}</td>
-          <td>{{ m.measure_id_local or '—' }}</td>
-          <td><code>{{ m.measure_class }}</code></td>
-          <td><span class="tag" data-v="{{ m.outcome }}">{{ m.outcome }}</span></td>
-          <td class="num">{% if m.pct_yes is not none %}{{ m.pct_yes|round(2) }}%{% else %}—{% endif %}</td>
-          <td class="num">{% if m.threshold_required is not none %}{{ m.threshold_required|round(2) }}%{% else %}<span class="dim">unknown</span>{% endif %}</td>
-          <td class="num">{% if m.margin_vs_threshold is not none %}{{ m.margin_vs_threshold|round(2) }}{% else %}—{% endif %}</td>
-          <td class="dim">{{ (m.stated_purpose or '')[:60] }}</td>
-          <td><a href="{{ m.url }}" rel="noopener" target="_blank">source</a></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% else %}
-    <p class="hint">No ballot measures recorded for this county yet.</p>
-    {% endif %}
-  {% elif r.category == 'framework' %}
-    {% set fw = framework.get(key, {}) %}
-    {% if fw.get('thresholds') %}
-    <h3>What it takes to pass</h3>
-    <div class="scroll">
-    <table>
-      <thead><tr><th>Measure kind</th><th>Applies to</th><th class="num">Threshold</th><th>Share of</th><th>Cite</th><th>Conf</th><th>Source</th></tr></thead>
-      <tbody>
-        {% for t in fw.thresholds %}
-        <tr>
-          <td><code>{{ t.measure_class }}</code></td>
-          <td class="dim">{{ t.jurisdiction_kind or 'any' }}{% if t.purpose_restriction %} · {{ t.purpose_restriction }}{% endif %}</td>
-          <td class="num">{{ t.threshold_value }}%</td>
-          <td class="dim">{{ t.threshold_basis }}</td>
-          <td class="dim">{{ t.statute_cite }}</td>
-          <td>{{ t.confidence }}</td>
-          <td><a href="{{ t.url }}" rel="noopener" target="_blank">source</a></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% endif %}
-    {% if fw.get('grants') %}
-    <h3 style="margin-top:.8rem">What the state allows</h3>
-    <div class="scroll">
-    <table>
-      <thead><tr><th>Tax</th><th>Applies to</th><th>Allowed</th><th class="num">Cap</th><th>Cite</th><th>Conf</th><th>Source</th></tr></thead>
-      <tbody>
-        {% for g in fw.grants %}
-        <tr>
-          <td><code>{{ g.instrument_code }}</code> <span class="dim">{{ g.category }}</span></td>
-          <td class="dim">{{ g.jurisdiction_kind or 'any' }}</td>
-          <td><span class="tag" data-v="{{ g.permitted }}">{{ g.permitted }}</span></td>
-          <td class="num">{% if g.max_rate is not none %}{{ g.max_rate }} <span class="dim">{{ g.max_rate_unit }}</span>{% else %}<span class="dim">none stated</span>{% endif %}</td>
-          <td class="dim">{{ g.statute_cite }}</td>
-          <td>{{ g.confidence }}</td>
-          <td><a href="{{ g.url }}" rel="noopener" target="_blank">source</a></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% endif %}
-    {% if not fw.get('thresholds') and not fw.get('grants') %}
-    <p class="hint">Nothing recorded for this state's rules yet.</p>
-    {% endif %}
-  {% else %}
-    {% set recs = findings.get(key, []) %}
-    {% if recs %}
-    <table>
-      <thead><tr><th>Instrument</th><th>Status</th><th class="num">Rate</th><th>Conf</th><th>How</th><th>Source</th></tr></thead>
-      <tbody>
-        {% for t in recs %}
-        <tr>
-          <td><code>{{ t.instrument_code }}</code></td>
-          <td><span class="tag" data-v="{{ t.status }}">{{ t.status }}</span></td>
-          <td class="num">{% if t.rate_value is not none %}{{ t.rate_value }} <span class="dim">{{ t.rate_unit }}</span>{% else %}—{% endif %}</td>
-          <td>{{ t.confidence }}</td>
-          <td class="dim">{{ t.extraction_method }}</td>
-          <td><a href="{{ t.url }}" rel="noopener" target="_blank">source</a></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="hint">No tax rates recorded for this place yet.</p>
-    {% endif %}
-  {% endif %}
-  <div class="row" style="margin-top:.8rem;padding-top:.7rem;border-top:1px solid var(--line)">
-    <button class="primary" data-review="complete" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">Accept</button>
-    <button data-review="pending" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">Return to queue</button>
-    <button class="ghost" data-review="no_data" data-geoid="{{ r.geoid }}" data-category="{{ r.category }}">No data</button>
-    {% if r.category not in ('framework', 'elections') %}
-    <a class="btn" href="/manual?geoid={{ r.geoid }}&amp;category={{ r.category }}">Fill the gaps</a>
-    {% else %}
-    <a class="btn" href="/manual?geoid={{ r.geoid }}">Add the real document</a>
-    {% endif %}
+<div class="review-top">
+  <a class="btn btn-ghost" href="/" style="padding-left:0;font-size:14px">&larr; Today</a>
+  <div class="dots" id="review-dots">
+    {% for item in items %}<span class="{{ 'here' if loop.first else '' }}"></span>{% endfor %}
   </div>
-</section>
+  <span class="count" id="review-count">
+    {% if items %}1 of {{ items|length }}{% else %}all clear{% endif %}
+  </span>
+</div>
+
+{% for item in items %}
+<article class="review-item" data-geoid="{{ item.geoid }}" data-category="{{ item.category }}"
+         data-name="{{ item.name }}" {% if not loop.first %}hidden{% endif %}>
+  <div class="review">
+    <div>
+      <h1>{{ item.name }}</h1>
+      <p class="meta">{{ item.meta }} · <code>{{ item.geoid }}</code></p>
+
+      <div class="reason">
+        <svg width="17" height="17" viewBox="0 0 256 256" fill="none">
+          <path d="M48 40v176" stroke="currentColor" stroke-width="18" stroke-linecap="round"></path>
+          <path d="M48 56h136l-24 40 24 40H48Z" fill="currentColor" opacity=".25"></path>
+          <path d="M48 56h136l-24 40 24 40H48Z" stroke="currentColor" stroke-width="16" stroke-linejoin="round"></path>
+        </svg>
+        <p>
+          {%- if item.reasons -%}{{ item.reasons|join(' ') }}
+          {%- elif item.last_error -%}{{ item.last_error }}
+          {%- else -%}The second check could not confirm this one, so it came to you.{%- endif -%}
+        </p>
+      </div>
+
+      {% if item.rate %}
+      <div class="numbers">
+        <div>
+          <div class="k">The number found</div>
+          <div class="v">{{ item.rate }}</div>
+          <div class="note">{{ item.rate_note }}</div>
+        </div>
+        <div class="was">
+          <div class="k">On record before</div>
+          <div class="v">{{ item.previous }}</div>
+          <div class="note">{{ item.previous_note }}</div>
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="decide">
+        <button type="button" class="btn btn-primary" data-review="complete"
+                data-tip="Marks this finished and leaves the records in the database. Only if the source really supports them.">Publish it</button>
+        <button type="button" class="btn btn-secondary" data-review="pending"
+                data-tip="Sends the place back to the crawler to try again with other sources.">Try again</button>
+        <button type="button" class="btn btn-secondary" data-review="no_data"
+                data-tip="Records that this place genuinely does not levy this tax, so nobody researches it again.">No such tax</button>
+        <a class="btn btn-ghost" href="/manual?geoid={{ item.geoid }}&amp;category={{ item.category }}">Type it myself</a>
+      </div>
+      <p class="keys">Keyboard · <strong>1</strong> publish · <strong>2</strong> try again · <strong>3</strong> no such tax</p>
+
+      {% if item.findings|length > 1 %}
+      <div class="extra">
+        <p class="kicker">Everything recorded for this place and tax</p>
+        <table class="table">
+          <thead><tr><th>Instrument</th><th>Status</th><th class="num">Rate</th><th>Confidence</th><th>Source</th></tr></thead>
+          <tbody>
+            {% for t in item.findings %}
+            <tr>
+              <td><code>{{ t.instrument_code }}</code></td>
+              <td><span class="tag" data-v="{{ t.status }}">{{ t.status }}</span></td>
+              <td class="num">{% if t.rate_value is not none %}{{ t.rate_value }} <span class="dim">{{ t.rate_unit }}</span>{% else %}—{% endif %}</td>
+              <td>{{ t.confidence }}</td>
+              <td><a href="{{ t.url }}" rel="noopener" target="_blank">source</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
+      {% if item.measures %}
+      <div class="extra">
+        <p class="kicker">Ballot measures recorded</p>
+        <div class="scroll">
+          <table class="table">
+            <thead><tr><th>Date</th><th>Measure</th><th>Kind</th><th>Result</th><th class="num">Yes</th><th class="num">Needed</th><th>Source</th></tr></thead>
+            <tbody>
+              {% for m in item.measures %}
+              <tr>
+                <td>{{ m.election_date }}</td>
+                <td>{{ m.measure_id_local or '—' }}</td>
+                <td><code>{{ m.measure_class }}</code></td>
+                <td><span class="tag" data-v="{{ m.outcome }}">{{ m.outcome }}</span></td>
+                <td class="num">{% if m.pct_yes is not none %}{{ m.pct_yes|round(2) }}%{% else %}—{% endif %}</td>
+                <td class="num">{% if m.threshold_required is not none %}{{ m.threshold_required|round(2) }}%{% else %}<span class="dim">unknown</span>{% endif %}</td>
+                <td><a href="{{ m.url }}" rel="noopener" target="_blank">source</a></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if item.thresholds %}
+      <div class="extra">
+        <p class="kicker">What it takes to pass</p>
+        <div class="scroll">
+          <table class="table">
+            <thead><tr><th>Measure kind</th><th>Applies to</th><th class="num">Threshold</th><th>Share of</th><th>Cite</th><th>Source</th></tr></thead>
+            <tbody>
+              {% for t in item.thresholds %}
+              <tr>
+                <td><code>{{ t.measure_class }}</code></td>
+                <td class="dim">{{ t.jurisdiction_kind or 'any' }}</td>
+                <td class="num">{{ t.threshold_value }}%</td>
+                <td class="dim">{{ t.threshold_basis }}</td>
+                <td class="dim">{{ t.statute_cite }}</td>
+                <td><a href="{{ t.url }}" rel="noopener" target="_blank">source</a></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if item.grants %}
+      <div class="extra">
+        <p class="kicker">What the state allows</p>
+        <div class="scroll">
+          <table class="table">
+            <thead><tr><th>Tax</th><th>Applies to</th><th>Allowed</th><th class="num">Cap</th><th>Cite</th><th>Source</th></tr></thead>
+            <tbody>
+              {% for g in item.grants %}
+              <tr>
+                <td><code>{{ g.instrument_code }}</code></td>
+                <td class="dim">{{ g.jurisdiction_kind or 'any' }}</td>
+                <td><span class="tag" data-v="{{ g.permitted }}">{{ g.permitted }}</span></td>
+                <td class="num">{% if g.max_rate is not none %}{{ g.max_rate }} <span class="dim">{{ g.max_rate_unit }}</span>{% else %}<span class="dim">none stated</span>{% endif %}</td>
+                <td class="dim">{{ g.statute_cite }}</td>
+                <td><a href="{{ g.url }}" rel="noopener" target="_blank">source</a></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="card elev-sm source">
+      <div class="head">
+        <span class="kicker" style="opacity:.55">What the source says</span>
+        <span class="tag tag-neutral" data-tip="Every page is archived when it is fetched, so this is the text the AI actually read.">archived copy</span>
+      </div>
+      {% if item.quote %}
+      <p class="quote">{{ item.quote }}</p>
+      {% else %}
+      <p class="before">No quote was recorded with this answer. Open the source and read it
+        before publishing, or send the place back to the crawler.</p>
+      {% endif %}
+      {% if item.source_url %}
+      <div class="foot">
+        <a href="{{ item.source_url }}" rel="noopener" target="_blank">{{ item.source_name }}</a>
+        <div class="when">Fetched {{ item.fetched }} · {{ item.tier }}</div>
+      </div>
+      {% endif %}
+      <div class="foot">
+        <a href="/api/packet/{{ item.geoid }}?category={{ item.category }}" target="_blank">the research packet for this place</a>
+      </div>
+    </div>
+  </div>
+</article>
 {% endfor %}
+
+<div class="all-clear" id="all-clear" {% if items %}hidden{% endif %}>
+  <div class="big">That's the lot.</div>
+  <p>Everything else the crawler found passed the automatic check and is already in the database.</p>
+  <a class="btn btn-primary" href="/" style="margin-top:26px;font-size:15px;padding:11px 20px">Back to today</a>
+</div>
 {% endblock %}

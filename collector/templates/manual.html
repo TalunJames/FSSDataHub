@@ -8,7 +8,7 @@
   </div>
 </header>
 
-<section id="step-pick" class="wizard">
+<section id="step-pick" class="wizard two">
   <div class="panel stack">
     <h2>Who are you filling in?</h2>
     <label>Jurisdiction
@@ -24,7 +24,7 @@
   <div class="panel">
     <h2>Waiting on a person</h2>
     <p class="hint">Crawler misses, failed extracts, and review leftovers.</p>
-    <ul id="m-inbox" class="inbox"></ul>
+    <ul id="m-inbox" class="inbox-list"></ul>
   </div>
 </section>
 
@@ -70,7 +70,7 @@
   </form>
   <div class="panel">
     <h2>Intake for this place</h2>
-    <ul id="intake-list" class="inbox"></ul>
+    <ul id="intake-list" class="inbox-list"></ul>
   </div>
 </section>
 
@@ -83,7 +83,7 @@
     <p class="hint">Every primary instrument for this category is filled or was skipped recently. You can still drop a source, or send this to review.</p>
     <div class="row">
       <button type="button" class="primary" data-door="source">Drop a source</button>
-      <a class="btn" href="/review">Go to review</a>
+      <a class="btn btn-secondary" href="/review">Go to review</a>
     </div>
   </div>
   <div id="ask-card" class="panel q-card stack" hidden>
