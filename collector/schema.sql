@@ -93,6 +93,8 @@ CREATE INDEX IF NOT EXISTS idx_intake_geoid ON intake_item(geoid, category);
 
 -- Second-checker verdicts. One row per checked (geoid, category) pass;
 -- 'flag' rows carry a JSON array of {code, instrument_code, reason}.
+-- advice is the checker's recommendation for the human reviewer, as JSON
+-- {"lean": "publish"|"try_again"|"no_such_tax"|"unsure", "hint": "..."}.
 CREATE TABLE IF NOT EXISTS check_result (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id          INTEGER REFERENCES crawl_run(id),
@@ -100,6 +102,7 @@ CREATE TABLE IF NOT EXISTS check_result (
     category        TEXT NOT NULL,
     verdict         TEXT NOT NULL CHECK (verdict IN ('pass','flag','error')),
     flags           TEXT,
+    advice          TEXT,
     provider        TEXT,
     model           TEXT,
     created_at      TEXT NOT NULL
@@ -108,6 +111,30 @@ CREATE TABLE IF NOT EXISTS check_result (
 CREATE INDEX IF NOT EXISTS idx_check_geo ON check_result(geoid, category, id);
 CREATE INDEX IF NOT EXISTS idx_check_verdict ON check_result(verdict, id);
 CREATE INDEX IF NOT EXISTS idx_check_created ON check_result(created_at);
+
+-- What web searching has already been tried for one work item, so a new
+-- round never repeats wording that came up empty and the reflection step
+-- can see the history. One row per (place, category, query).
+-- source: 'built_in' = the standard query templates; 'ai' = wording the
+-- reflection step proposed after a failed round.
+-- last_outcome: 'found' = kept at least one official-looking result;
+-- 'nothing' = answered but nothing worth keeping; 'blocked' = every engine
+-- refused, which says nothing about the wording and is retried.
+CREATE TABLE IF NOT EXISTS search_query (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    geoid           TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    query           TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'built_in',
+    tries           INTEGER NOT NULL DEFAULT 0,
+    last_outcome    TEXT,
+    last_kept       INTEGER,
+    created_at      TEXT NOT NULL,
+    last_tried_at   TEXT,
+    UNIQUE(geoid, category, query)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sq_item ON search_query(geoid, category);
 
 CREATE TABLE IF NOT EXISTS interview_answer (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

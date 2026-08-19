@@ -33,6 +33,15 @@
         </p>
       </div>
 
+      {% if item.advice %}
+      <div class="advice">
+        <p>
+          {%- if item.advice.label -%}<strong>The checker leans "{{ item.advice.label }}".</strong> {% endif -%}
+          {{- item.advice.hint -}}
+        </p>
+      </div>
+      {% endif %}
+
       {% if item.rate %}
       <div class="numbers">
         <div>
@@ -48,12 +57,13 @@
       </div>
       {% endif %}
 
+      {% set suggested = item.advice.status if item.advice else "" %}
       <div class="decide">
-        <button type="button" class="btn btn-primary" data-review="complete"
+        <button type="button" class="btn btn-primary{{ ' suggested' if suggested == 'complete' }}" data-review="complete"
                 data-tip="Marks this finished and leaves the records in the database. Only if the source really supports them.">Publish it</button>
-        <button type="button" class="btn btn-secondary" data-review="pending"
-                data-tip="Sends the place back to the crawler to try again with other sources.">Try again</button>
-        <button type="button" class="btn btn-secondary" data-review="no_data"
+        <button type="button" class="btn btn-secondary{{ ' suggested' if suggested == 'pending' }}" data-review="pending"
+                data-tip="Sends the place back to the crawler to try again with other sources and fresh search wording.">Try again</button>
+        <button type="button" class="btn btn-secondary{{ ' suggested' if suggested == 'no_data' }}" data-review="no_data"
                 data-tip="Records that this place genuinely does not levy this tax, so nobody researches it again.">No such tax</button>
         <a class="btn btn-ghost" href="/manual?geoid={{ item.geoid }}&amp;category={{ item.category }}">Type it myself</a>
       </div>

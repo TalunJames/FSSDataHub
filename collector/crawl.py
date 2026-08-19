@@ -284,7 +284,11 @@ def new_diag():
     same as a thorough one.
     """
     return {"queries": 0, "answered": 0, "blocked": 0, "hits": 0,
-            "kept": 0, "provider": None, "skipped": 0, "benched": {}}
+            "kept": 0, "provider": None, "skipped": 0, "benched": {},
+            # Per-query outcomes for the search log. by_query is cleared by
+            # searchlog.record_round; tried accumulates for the whole item so
+            # the mid-crawl retry never re-runs wording this item already ran.
+            "by_query": {}, "tried": set()}
 
 
 # Queries per minute when `search_qpm` is left on auto. An API key buys a
@@ -302,8 +306,13 @@ def search_rate(settings, provider):
 
 
 def search_web(client, name, state, category, kind=None, limit=12, settings=None,
-               diag=None):
-    """Find official pages and documents. Failures are counted, not silent."""
+               diag=None, queries=None):
+    """Find official pages and documents. Failures are counted, not silent.
+
+    queries, when given, replaces the built-in templates — the search log
+    plans each round so dead wording is not repeated. Per-query outcomes
+    land in diag['by_query'] for the log to record.
+    """
     settings = settings or {}
     diag = diag if diag is not None else new_diag()
     api_key = (settings.get("search_api_key") or "").strip()
@@ -315,8 +324,13 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
     qpm = search_rate(settings, provider)
     out = []
     seen = set()
-    for q in search_queries(name, state, category, kind):
+    if queries is None:
+        queries = search_queries(name, state, category, kind)
+    for q in queries:
         diag["queries"] += 1
+        qrec = diag.setdefault("by_query", {}).setdefault(
+            q, {"kept": 0, "blocked": False})
+        diag.setdefault("tried", set()).add(q)
         engines = []
         if provider == "brave" and api_key:
             engines.append(
@@ -351,6 +365,7 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
         # were all benched there was nothing to ask, which is also blocked:
         # the query went unanswered either way and must not read as a zero.
         blocked = not hits and (tried == 0 or refusals == tried)
+        qrec["blocked"] = blocked
         if hits:
             diag["answered"] += 1
         elif blocked:
@@ -365,6 +380,7 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
             seen.add(url)
             out.append(url)
             diag["kept"] += 1
+            qrec["kept"] += 1
             if len(out) >= limit:
                 return out
     return out
@@ -1041,17 +1057,28 @@ def item_seeds(conn, client, settings, geoid, category, name, state, kind,
     """Catalog URLs first, then web search for the site and its documents.
 
     The catalog is category-aware: the framework pass starts from statute
-    roots, not from this year's rate table.
+    roots, not from this year's rate table. The queries come from the search
+    log's plan for this item: wording that already came up empty is not
+    repeated, and wording the reflection step proposed runs first.
     """
+    from . import searchlog
+
+    diag = diag if diag is not None else new_diag()
     seed_urls = seeds_for(conn, geoid, state, settings, category=category)
     if store.as_bool(settings.get("web_search")):
+        queries = searchlog.plan_round(
+            conn, settings, geoid, category,
+            search_queries(name, state, category, kind))
         seed_urls.extend(search_web(client, name, state, category, kind=kind,
-                                    settings=settings, diag=diag))
+                                    settings=settings, diag=diag,
+                                    queries=queries))
         # Retry only when every engine refused the first pass. Repeating the
         # same queries after a genuine zero-result search just burns quota.
         if not seed_urls and diag is not None and diag.get("blocked"):
             seed_urls.extend(search_web(client, name, state, category, kind=kind,
-                                        settings=settings, diag=diag))
+                                        settings=settings, diag=diag,
+                                        queries=queries))
+        searchlog.record_round(conn, geoid, category, diag)
     return seed_urls
 
 
@@ -1098,12 +1125,23 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
             if extra_search or not do_search or _has_signal(pages):
                 break
             extra_search = True
+            # Only wording this item has not already run: the first pass's
+            # queries and their outcomes are in the log by now, so a repeat
+            # would burn quota re-asking questions just answered.
+            from . import searchlog
+            extra_q = searchlog.plan_round(
+                conn, settings, geoid, category,
+                search_queries(name, state, category, kind),
+                exclude=diag.get("tried") or set(), allow_reflect=False)
+            if not extra_q:
+                break
             for u in search_web(client, name, state, category, kind=kind, limit=16,
-                                settings=settings, diag=diag):
+                                settings=settings, diag=diag, queries=extra_q):
                 host = (urlparse(u).hostname or "").lower()
                 if host:
                     seed_hosts.add(host)
                 _enqueue(queue, seen, u, 0, cap, prefer=is_document_url(u))
+            searchlog.record_round(conn, geoid, category, diag)
             if not queue:
                 break
 

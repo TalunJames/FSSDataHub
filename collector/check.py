@@ -55,6 +55,23 @@ PLAUSIBLE = {
     "usd_per_unit": (0.0, 100000.0),
 }
 
+# Appended to every checker prompt: the shape of the recommendation the
+# human reviewer sees beside the flags. The reviewer's buttons are exactly
+# these three actions plus reading the source themselves, so the lean must
+# be one of them or an honest "unsure".
+ADVICE_GUIDANCE = """
+advice is your overall read for the human who reviews anything you flag.
+lean:
+- "publish" when the values are defensible despite the concerns raised.
+- "try_again" when better official documents likely exist and another
+  crawl should find them (wrong document, wrong jurisdiction, stale page).
+- "no_such_tax" only when the documents affirmatively show this tax or
+  measure does not exist here.
+- "unsure" when a person genuinely has to read the source to decide.
+hint: one or two plain sentences saying what to check first and why.
+Always include advice, even when every verdict is pass.
+"""
+
 CHECK_SYSTEM = """You are a skeptical reviewer for a US local-tax database.
 You are the second set of eyes on findings another model extracted from
 official documents. Your job is to catch mistakes, not to be agreeable.
@@ -71,9 +88,10 @@ Flag a finding when any of these fail:
 
 Pass a finding only when it is defensible as-is. When uncertain, flag.
 Respond with ONLY valid JSON:
-{"verdicts":[{"instrument_code":"...","verdict":"pass"|"flag","reason":"short reason, empty when pass"}]}
+{"verdicts":[{"instrument_code":"...","verdict":"pass"|"flag","reason":"short reason, empty when pass"}],
+ "advice":{"lean":"publish"|"try_again"|"no_such_tax"|"unsure","hint":"one or two sentences"}}
 Include one verdict per finding you were given.
-"""
+""" + ADVICE_GUIDANCE
 
 
 MEASURE_SYSTEM = CHECK_SYSTEM_MEASURE = """You are a skeptical reviewer for a
@@ -94,9 +112,10 @@ Flag a measure when any of these fail:
 
 Pass a measure only when it is defensible as-is. When uncertain, flag.
 Respond with ONLY valid JSON:
-{"verdicts":[{"instrument_code":"<measure_id_local or election_date>","verdict":"pass"|"flag","reason":"short reason, empty when pass"}]}
+{"verdicts":[{"instrument_code":"<measure_id_local or election_date>","verdict":"pass"|"flag","reason":"short reason, empty when pass"}],
+ "advice":{"lean":"publish"|"try_again"|"no_such_tax"|"unsure","hint":"one or two sentences"}}
 Include one verdict per measure you were given.
-"""
+""" + ADVICE_GUIDANCE
 
 FRAMEWORK_SYSTEM = """You are a skeptical reviewer for a US local-tax
 statutory database. Another model read state code and recorded vote
@@ -116,9 +135,10 @@ Flag a row when any of these fail:
 
 Pass a row only when it is defensible as-is. When uncertain, flag.
 Respond with ONLY valid JSON:
-{"verdicts":[{"instrument_code":"<measure_class or instrument_code>","verdict":"pass"|"flag","reason":"short reason, empty when pass"}]}
+{"verdicts":[{"instrument_code":"<measure_class or instrument_code>","verdict":"pass"|"flag","reason":"short reason, empty when pass"}],
+ "advice":{"lean":"publish"|"try_again"|"no_such_tax"|"unsure","hint":"one or two sentences"}}
 Include one verdict per row you were given.
-"""
+""" + ADVICE_GUIDANCE
 
 
 def _id_filter(ids, column="id"):
@@ -421,9 +441,93 @@ def excerpt_doc(doc_text, rows, max_chars, pad=2000, head=3000):
     return "\n\n[... document trimmed to the passages around each finding ...]\n\n".join(parts)
 
 
+# Recommendations a lean may take; anything else the model says is "unsure".
+ADVICE_LEANS = ("publish", "try_again", "no_such_tax", "unsure")
+
+# What to tell the reviewer for each hard mechanical flag. These items skip
+# the model call (a contradiction is not a judgement call), so their advice
+# is written here, once, in plain words. Format: code -> (lean, hint).
+HARD_ADVICE = {
+    "implausible_rate": ("try_again",
+        "The number is far outside anything plausible for its unit, which "
+        "usually means units got mixed up (mills read as percent, or a "
+        "state total read as local). If the source really says this, type "
+        "it in yourself; otherwise send it back."),
+    "status_conflict": ("unsure",
+        "The record says this tax is prohibited but a rate was recorded "
+        "with it. One of the two is wrong: check whether the document "
+        "describes a real levy or a ban."),
+    "over_cap": ("try_again",
+        "The rate is above its own recorded cap, so one of the two numbers "
+        "likely belongs to another jurisdiction or year. Check which one "
+        "the source actually supports."),
+    "date_regression": ("unsure",
+        "This rate came from an older document than the rate it replaced. "
+        "Compare the dates in both sources: if the older document really is "
+        "current, publish; if not, try again so the newer rate comes back."),
+    "undated_supersede": ("unsure",
+        "An undated rate replaced a dated one, so the machine cannot tell "
+        "which is current. Open both sources and keep whichever the newer "
+        "document supports."),
+    "no_result": ("try_again",
+        "The measure has no vote counts and no percentage, so it cannot be "
+        "judged against its threshold. Try again so the crawler looks for "
+        "the certified canvass, or type the numbers in from the county's "
+        "results."),
+    "future_result": ("try_again",
+        "A result is recorded for an election that has not happened yet, "
+        "so the date or the result is wrong. Send it back unless the "
+        "source clearly supports both."),
+    "threshold_scale": ("try_again",
+        "The threshold looks like a fraction (0.6) rather than a "
+        "percentage (60). If the statute is quoted correctly, type the "
+        "corrected number in yourself."),
+}
+
+ADVICE_ERROR = {
+    "lean": "unsure",
+    "hint": ("The second check never ran, so nothing has confirmed this. "
+             "Read the archived text against the number before publishing."),
+}
+
+ADVICE_FLAGGED_DEFAULT = {
+    "lean": "unsure",
+    "hint": ("The checker flagged this but gave no recommendation. Weigh "
+             "its reasons against the archived source text."),
+}
+
+
+def hard_advice(flags):
+    """The reviewer hint for a hard-flagged item, from its first known code."""
+    for f in flags:
+        lean_hint = HARD_ADVICE.get(f.get("code"))
+        if lean_hint:
+            return {"lean": lean_hint[0], "hint": lean_hint[1]}
+    return dict(ADVICE_FLAGGED_DEFAULT)
+
+
+def parse_advice(doc):
+    """The model's advice object, normalized, or None when absent/garbled."""
+    adv = doc.get("advice") if isinstance(doc, dict) else None
+    if not isinstance(adv, dict):
+        return None
+    lean = str(adv.get("lean") or "").strip().lower()
+    hint = str(adv.get("hint") or "").strip()[:400]
+    if lean not in ADVICE_LEANS:
+        lean = "unsure"
+    if not hint and lean == "unsure":
+        return None
+    return {"lean": lean, "hint": hint}
+
+
 def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
              system=None, concerns=None):
-    """Returns (flags, error). error is set when the checker call failed."""
+    """Returns (flags, advice, error). error is set when the call failed.
+
+    advice is the model's recommendation for the reviewer, or None — an
+    older prompt or a small local model may not return one, and the
+    verdicts stand on their own without it.
+    """
     max_chars = store.as_int(settings.get("checker_max_chars"), 80000)
     # Whatever columns the subject query selected, minus the internal id.
     findings = [{k: r[k] for k in r.keys() if k != "id"} for r in rows]
@@ -454,11 +558,11 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
                             provider=checker_provider(settings),
                             effort=extract.DEFAULT_CHECKER_EFFORT)
     if err:
-        return [], err
+        return [], None, err
     try:
         doc = extract.parse_json_payload(raw)
     except extract.ExtractError as exc:
-        return [], "checker returned unparseable output: %s" % exc
+        return [], None, "checker returned unparseable output: %s" % exc
     # A parseable answer in the wrong shape is still not a verdict. Anything
     # short of one explicit verdict per finding is an error, and any verdict
     # that is not exactly "pass" is a flag — the failure direction here must
@@ -467,10 +571,11 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
         (doc if isinstance(doc, list) else None)
     if not isinstance(verdicts, list) or not all(
             isinstance(v, dict) for v in verdicts):
-        return [], "checker returned no usable verdicts array"
+        return [], None, "checker returned no usable verdicts array"
     if len(verdicts) < len(rows):
-        return [], ("checker returned %d verdict(s) for %d finding(s) — "
-                    "not one per finding as asked" % (len(verdicts), len(rows)))
+        return [], None, ("checker returned %d verdict(s) for %d finding(s) — "
+                          "not one per finding as asked"
+                          % (len(verdicts), len(rows)))
     out = []
     for v in verdicts:
         word = str(v.get("verdict") or "").strip().lower()
@@ -481,7 +586,7 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
                 "reason": (v.get("reason")
                            or "checker verdict %r" % (word or "missing"))[:300],
             })
-    return out, None
+    return out, parse_advice(doc), None
 
 
 def checker_provider(settings):
@@ -500,12 +605,14 @@ def checker_model_name(settings):
             or extract.default_model(settings, checker_provider(settings)))
 
 
-def record(conn, run_id, geoid, category, verdict, flags, settings):
+def record(conn, run_id, geoid, category, verdict, flags, settings,
+           advice=None):
     conn.execute(
         "INSERT INTO check_result (run_id, geoid, category, verdict, flags, "
-        "provider, model, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        "advice, provider, model, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
         (run_id, geoid, category, verdict,
          json.dumps(flags) if flags else None,
+         json.dumps(advice) if advice else None,
          checker_provider(settings), checker_model_name(settings), db.now()))
 
 
@@ -589,16 +696,18 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
         message = summarize(hard)
         ledger.set_status(conn, geoid, category, "needs_review",
                           error=message[:500])
-        record(conn, run_id, geoid, category, "flag", hard, settings)
+        record(conn, run_id, geoid, category, "flag", hard, settings,
+               advice=hard_advice(hard))
         conn.commit()
         return "flag", message
 
     err = None
     ai = []
+    advice = None
     if checker_provider(settings) != "none":
-        ai, err = ai_flags(settings, jurisdiction, category, rows,
-                           doc_text, images=images, system=system,
-                           concerns=soft)
+        ai, advice, err = ai_flags(settings, jurisdiction, category, rows,
+                                   doc_text, images=images, system=system,
+                                   concerns=soft)
     else:
         err = "no AI provider for the checker"
 
@@ -607,6 +716,7 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
         message = "second check unavailable (%s) — review by hand" % err[:200]
         ledger.set_status(conn, geoid, category, "needs_review", error=message)
         flags = soft
+        advice = dict(ADVICE_ERROR)
     elif ai:
         # The model found something. Carry the soft concerns along as context
         # for whoever reads the review page.
@@ -614,6 +724,7 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
         flags = ai + soft
         message = summarize(flags)
         ledger.set_status(conn, geoid, category, "needs_review", error=message[:500])
+        advice = advice or dict(ADVICE_FLAGGED_DEFAULT)
     else:
         # Soft concerns only, and the model read the documents and was not
         # troubled. That is the call we asked it to make: file it.
@@ -623,7 +734,9 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
         if soft:
             message += " (%d mechanical concern(s) judged immaterial)" % len(soft)
         ledger.set_status(conn, geoid, category, "complete", error=None)
+        advice = None
 
-    record(conn, run_id, geoid, category, verdict, flags, settings)
+    record(conn, run_id, geoid, category, verdict, flags, settings,
+           advice=advice)
     conn.commit()
     return verdict, message
