@@ -541,6 +541,8 @@ CREATE TABLE IF NOT EXISTS work_item (
 
 CREATE INDEX IF NOT EXISTS idx_work_queue ON work_item(status, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_work_batch ON work_item(batch);
+-- "Finished this week" counters and the refresh sweep both filter on it.
+CREATE INDEX IF NOT EXISTS idx_work_completed ON work_item(completed_at);
 
 CREATE TABLE IF NOT EXISTS run_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -566,8 +568,12 @@ INSERT OR IGNORE INTO revenue_measure_class VALUES
   ('assessment_district'),('de_bruce'),('charter_fiscal');
 
 -- ============================================================ PRODUCT VIEWS
+-- Every view is dropped first so a changed definition actually reaches
+-- existing databases: CREATE VIEW IF NOT EXISTS never updates a view that
+-- already exists, and apply_schema runs this file on every connect.
 
-CREATE VIEW IF NOT EXISTS v_current_tax AS
+DROP VIEW IF EXISTS v_current_tax;
+CREATE VIEW v_current_tax AS
 SELECT t.*, j.name AS jurisdiction_name, j.kind, j.state_usps, j.population,
        s.url AS source_url, s.name AS source_name, s.authority_tier
 FROM tax_instrument t
@@ -575,7 +581,8 @@ JOIN jurisdiction j ON j.geoid = t.geoid
 JOIN source s       ON s.id    = t.source_id
 WHERE t.superseded_by IS NULL;
 
-CREATE VIEW IF NOT EXISTS v_sunset_watch AS
+DROP VIEW IF EXISTS v_sunset_watch;
+CREATE VIEW v_sunset_watch AS
 SELECT j.state_usps, j.name, j.kind, j.population, j.geoid,
        t.category, t.instrument_code, t.rate_value, t.rate_unit,
        t.expiration_date,
@@ -599,7 +606,12 @@ WHERE t.superseded_by IS NULL
 ORDER BY days_out;
 
 -- Exactly one live, most-specific grant per (state, kind, instrument).
-CREATE VIEW IF NOT EXISTS v_live_grant AS
+-- The winner is picked across ALL permitted values: a newer permitted='no'
+-- row must win its group and suppress the grant it revokes, not lose to it.
+-- Both effective bounds apply inside too, so a future-dated row cannot win
+-- the group and hide the rule in force today.
+DROP VIEW IF EXISTS v_live_grant;
+CREATE VIEW v_live_grant AS
 SELECT * FROM authority_grant a
 WHERE a.permitted = 'yes'
   AND (a.effective_from IS NULL OR a.effective_from <= date('now'))
@@ -608,17 +620,21 @@ WHERE a.permitted = 'yes'
     SELECT a2.id FROM authority_grant a2
     WHERE a2.state_usps = a.state_usps
       AND a2.instrument_code = a.instrument_code
-      AND a2.permitted = 'yes'
       AND (a2.jurisdiction_kind = a.jurisdiction_kind
            OR (a2.jurisdiction_kind IS NULL AND a.jurisdiction_kind IS NULL))
+      AND (a2.effective_from IS NULL OR a2.effective_from <= date('now'))
       AND (a2.effective_to IS NULL OR a2.effective_to >= date('now'))
     ORDER BY COALESCE(a2.effective_from,'0000') DESC, a2.id DESC
     LIMIT 1
   );
 
 -- Exactly one live, most-specific threshold per
--- (state, kind, measure_class, purpose). Mirrors v_live_grant.
-CREATE VIEW IF NOT EXISTS v_live_threshold AS
+-- (state, kind, measure_class, instrument, purpose). Mirrors v_live_grant.
+-- instrument_code is part of the group: a general rule and an
+-- instrument-specific rule legitimately coexist, and collapsing them
+-- made the statewide general rule vanish.
+DROP VIEW IF EXISTS v_live_threshold;
+CREATE VIEW v_live_threshold AS
 SELECT * FROM threshold_rule t
 WHERE (t.effective_from IS NULL OR t.effective_from <= date('now'))
   AND (t.effective_to   IS NULL OR t.effective_to   >= date('now'))
@@ -628,15 +644,16 @@ WHERE (t.effective_from IS NULL OR t.effective_from <= date('now'))
       AND t2.measure_class = t.measure_class
       AND (t2.jurisdiction_kind = t.jurisdiction_kind
            OR (t2.jurisdiction_kind IS NULL AND t.jurisdiction_kind IS NULL))
+      AND (t2.instrument_code = t.instrument_code
+           OR (t2.instrument_code IS NULL AND t.instrument_code IS NULL))
       AND (t2.purpose_restriction = t.purpose_restriction
            OR (t2.purpose_restriction IS NULL AND t.purpose_restriction IS NULL))
+      AND (t2.effective_from IS NULL OR t2.effective_from <= date('now'))
       AND (t2.effective_to IS NULL OR t2.effective_to >= date('now'))
     ORDER BY COALESCE(t2.effective_from,'0000') DESC, t2.id DESC
     LIMIT 1
   );
 
--- Dropped first so a changed definition actually reaches existing databases:
--- CREATE VIEW IF NOT EXISTS never updates a view that already exists.
 DROP VIEW IF EXISTS v_headroom;
 CREATE VIEW v_headroom AS
 SELECT j.geoid, j.name, j.state_usps, j.kind, j.population,
@@ -665,7 +682,8 @@ LEFT JOIN (
 ) lev ON lev.geoid = j.geoid AND lev.instrument_code = g.instrument_code
      AND lev.rate_unit = g.max_rate_unit;
 
-CREATE VIEW IF NOT EXISTS v_near_miss AS
+DROP VIEW IF EXISTS v_near_miss;
+CREATE VIEW v_near_miss AS
 SELECT j.state_usps, j.name, j.population, b.election_date, b.measure_id_local,
        b.measure_class, b.rate_value, b.rate_unit,
        b.pct_yes, b.threshold_required, b.margin_vs_threshold,
@@ -679,7 +697,8 @@ WHERE b.outcome = 'failed'
   AND b.election_date >= date('now', '-6 years')
 ORDER BY b.margin_vs_threshold DESC;
 
-CREATE VIEW IF NOT EXISTS v_measure_capture_gap AS
+DROP VIEW IF EXISTS v_measure_capture_gap;
+CREATE VIEW v_measure_capture_gap AS
 SELECT j.state_usps, j.name, j.geoid, j.population,
        e.category, e.instrument_code, e.change_type,
        e.rate_before, e.rate_after, e.effective_period
@@ -694,7 +713,8 @@ WHERE e.measure_id IS NULL
   )
 ORDER BY j.state_usps, e.effective_period DESC;
 
-CREATE VIEW IF NOT EXISTS v_coverage AS
+DROP VIEW IF EXISTS v_coverage;
+CREATE VIEW v_coverage AS
 SELECT j.state_usps, j.kind, w.category, w.status, COUNT(*) AS n,
        SUM(COALESCE(j.population, 0)) AS pop
 FROM work_item w

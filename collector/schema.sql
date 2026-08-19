@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS crawl_page (
 CREATE INDEX IF NOT EXISTS idx_cp_run ON crawl_page(run_id);
 CREATE INDEX IF NOT EXISTS idx_cp_geoid ON crawl_page(geoid, category);
 CREATE INDEX IF NOT EXISTS idx_cp_url ON crawl_page(url);
+-- The home page's "this week" counters filter on fetched_at; unindexed,
+-- every page load table-scanned the largest table in the file.
+CREATE INDEX IF NOT EXISTS idx_cp_fetched ON crawl_page(fetched_at);
 
 CREATE TABLE IF NOT EXISTS crawl_extract (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +107,7 @@ CREATE TABLE IF NOT EXISTS check_result (
 
 CREATE INDEX IF NOT EXISTS idx_check_geo ON check_result(geoid, category, id);
 CREATE INDEX IF NOT EXISTS idx_check_verdict ON check_result(verdict, id);
+CREATE INDEX IF NOT EXISTS idx_check_created ON check_result(created_at);
 
 CREATE TABLE IF NOT EXISTS interview_answer (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

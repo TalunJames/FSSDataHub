@@ -182,12 +182,13 @@ def process_item(conn, settings, item):
         if geoid and category:
             if res.get("written"):
                 check.run_and_apply(conn, settings, None, geoid, category,
-                                    text or "", images=images)
+                                    text or "", images=images,
+                                    claim_ids=res.get("claim_ids"))
             else:
                 ledger.set_status(conn, geoid, category, "needs_review")
         conn.commit()
         return res.get("written") or 0
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         _fail(conn, item_id, str(exc)[:500], geoid=geoid, category=category)
         return 0
 

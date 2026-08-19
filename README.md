@@ -93,7 +93,7 @@ Every layer has a writer. `threshold_rule`, `authority_grant` and
 `ballot_measure` are filled by the research passes below; nothing in L2 or L4
 is populate-by-hand-only.
 
-Schema: `taxdb/schema.sql` (one file, 18 tables, 8 views).
+Schema: `taxdb/schema.sql` (one file, 21 tables, 8 views).
 Vocabulary: `taxdb/vocab.py`. Read both before the first real batch.
 
 Provenance is required on every claim: `source_id`, `archive_file_id`,

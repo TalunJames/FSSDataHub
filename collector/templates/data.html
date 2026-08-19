@@ -60,7 +60,7 @@
       <tr>
         <td>{{ r.state_usps }}</td><td>{{ r.name }}</td><td>{{ r.election_date }}</td>
         <td>{{ r.measure_id_local }}</td><td>{{ r.measure_class }}</td>
-        <td class="num">{{ r.pct_yes|round(2) }}%</td><td class="num">{{ r.threshold_required|round(2) }}%</td>
+        <td class="num">{% if r.pct_yes is not none %}{{ r.pct_yes|round(2) }}%{% else %}—{% endif %}</td><td class="num">{% if r.threshold_required is not none %}{{ r.threshold_required|round(2) }}%{% else %}—{% endif %}</td>
         <td class="num bad">{{ r.margin_vs_threshold|round(2) }}</td>
       </tr>
       {% endfor %}

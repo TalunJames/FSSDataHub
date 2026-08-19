@@ -21,7 +21,8 @@ def db_path():
 def now():
     # Space separator, not 'T': SQLite's datetime() emits the space form, and
     # string comparisons between the two silently fail ('T' sorts above ' ').
-    return datetime.datetime.utcnow().replace(microsecond=0).isoformat(sep=" ")
+    return datetime.datetime.now(datetime.timezone.utc).replace(
+        microsecond=0, tzinfo=None).isoformat(sep=" ")
 
 
 def today():

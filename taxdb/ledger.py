@@ -68,13 +68,14 @@ def plan(conn, states=None, kinds=("county", "place"), categories=None,
         for cat in categories:
             if cat in fixed and row["kind"] not in fixed[cat]:
                 continue
-            status, done_at, note = "pending", None, None
-            if _has_bulk(conn, row["geoid"], cat):
-                status, done_at, note = "complete", db.now(), BULK_NOTE
+            # Inserted pending; the single park_bulk_covered sweep below files
+            # the bulk-answered ones. A per-row _has_bulk lookup here cost one
+            # SELECT per (jurisdiction x category) — ~110k queries on a full
+            # national plan — to compute what the sweep already computes.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO work_item (geoid, category, priority, batch, "
-                "status, completed_at, last_error, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-                (row["geoid"], cat, pri, batch, status, done_at, note, db.now()),
+                "status, updated_at) VALUES (?,?,?,?,?,?)",
+                (row["geoid"], cat, pri, batch, "pending", db.now()),
             )
             created += cur.rowcount
     park_bulk_covered(conn)
@@ -162,25 +163,33 @@ def claim(conn, limit=10, states=None, categories=None, batch=None, kinds=None,
     return rows
 
 
-def _has_bulk(conn, geoid, category):
-    return conn.execute(
-        "SELECT 1 FROM tax_instrument WHERE geoid=? AND category=? "
-        "AND superseded_by IS NULL AND extraction_method='bulk_import'",
-        (geoid, category)).fetchone() is not None
-
-
-def park_bulk_covered(conn):
+def park_bulk_covered(conn, pairs=None, commit=True):
     """File items an adapter already answered, so they are neither crawled
-    nor put in front of a human. See BULK_NOTE."""
-    cur = conn.execute(
-        "UPDATE work_item SET status='complete', completed_at=COALESCE(completed_at,?), "
-        "last_error=?, updated_at=? "
-        "WHERE status IN ('pending','in_progress','needs_review') AND EXISTS ("
-        "  SELECT 1 FROM tax_instrument t WHERE t.geoid=work_item.geoid "
-        "  AND t.category=work_item.category AND t.superseded_by IS NULL "
-        "  AND t.extraction_method='bulk_import')",
-        (db.now(), BULK_NOTE, db.now()))
-    conn.commit()
+    nor put in front of a human. See BULK_NOTE.
+
+    pairs, when given, restricts the sweep to those (geoid, category) tuples —
+    per-document ingest passes what it touched instead of re-sweeping the whole
+    ledger. commit=False leaves the transaction to the caller so ingest stays
+    atomic end to end.
+    """
+    sql = ("UPDATE work_item SET status='complete', completed_at=COALESCE(completed_at,?), "
+           "last_error=?, updated_at=? "
+           "WHERE status IN ('pending','in_progress','needs_review') AND EXISTS ("
+           "  SELECT 1 FROM tax_instrument t WHERE t.geoid=work_item.geoid "
+           "  AND t.category=work_item.category AND t.superseded_by IS NULL "
+           "  AND t.extraction_method='bulk_import')")
+    params = [db.now(), BULK_NOTE, db.now()]
+    pairs = list(pairs) if pairs is not None else None
+    if pairs is not None:
+        if not pairs:
+            return 0
+        sql += " AND (%s)" % " OR ".join(
+            "(geoid=? AND category=?)" for _ in pairs)
+        for geoid, cat in pairs:
+            params += [geoid, cat]
+    cur = conn.execute(sql, params)
+    if commit:
+        conn.commit()
     return cur.rowcount
 
 
@@ -236,10 +245,18 @@ def requeue_stale(conn, days=365, limit=500):
     liability rather than an asset. Attempts reset: this is a fresh look, not
     a retry of a failure.
     """
+    # Bulk-covered items stay out: their data refreshes when the adapter
+    # re-runs, not by crawling, and requeueing them only for claim() to park
+    # them again left continuous mode spinning REFRESH -> park -> REFRESH
+    # forever once the queue was otherwise drained.
     rows = conn.execute(
         "SELECT id FROM work_item WHERE status IN ('complete','no_data') "
         "AND completed_at IS NOT NULL "
-        "AND completed_at < datetime('now', ?) ORDER BY priority DESC LIMIT ?",
+        "AND completed_at < datetime('now', ?) "
+        "AND NOT EXISTS (SELECT 1 FROM tax_instrument t "
+        "  WHERE t.geoid=work_item.geoid AND t.category=work_item.category "
+        "  AND t.superseded_by IS NULL AND t.extraction_method='bulk_import') "
+        "ORDER BY priority DESC LIMIT ?",
         ("-%d days" % int(days), limit)).fetchall()
     for r in rows:
         conn.execute(

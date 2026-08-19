@@ -3,6 +3,16 @@
 
   const state = { geoid: "", name: "", category: "", session: null, files: [] };
 
+  // Everything interpolated into innerHTML below comes from the database, and
+  // much of that came from crawled web pages (titles, URLs, error text). A
+  // hostile page title must render as text, never run.
+  const esc = window.escapeHtml;
+
+  // No interview for the pass categories: their answers are documents
+  // (canvasses, statute pages), so the wizard goes straight to the source
+  // drop instead of dead-ending on the interview API.
+  const PASS_CATS = ["elections", "framework"];
+
   function show(id) {
     ["step-pick", "step-choose", "step-source", "step-ask"].forEach((s) => {
       const el = document.getElementById(s);
@@ -29,15 +39,20 @@
       return;
     }
     ul.innerHTML = rows.map((r) =>
-      `<li><button type="button" class="linkish" data-pick="${r.geoid}" data-cat="${r.category}">
-        ${r.name} <span class="dim">${r.state_usps} · ${r.category}</span>
-        <span class="pill-soft">${r.status}</span>
+      `<li><button type="button" class="linkish" data-pick="${esc(r.geoid)}" data-cat="${esc(r.category)}">
+        ${esc(r.name)} <span class="dim">${esc(r.state_usps)} · ${esc(r.category)}</span>
+        <span class="pill-soft">${esc(r.status)}</span>
       </button>
-      ${r.last_error ? `<div class="dim">${r.last_error}</div>` : ""}</li>`
+      ${r.last_error ? `<div class="dim">${esc(r.last_error)}</div>` : ""}</li>`
     ).join("");
   }
 
   async function openChoose() {
+    if (PASS_CATS.includes(state.category)) {
+      show("step-source");
+      loadIntake().catch(() => {});
+      return;
+    }
     const sess = await api("/api/interview?geoid=" + encodeURIComponent(state.geoid)
       + "&category=" + encodeURIComponent(state.category));
     state.session = sess;
@@ -55,7 +70,7 @@
     const known = document.getElementById("choose-known");
     if (sess.known.length) {
       known.innerHTML = "<table><tbody>" + sess.known.map((k) =>
-        `<tr><td>${k.label}</td><td>${k.status}</td><td>${k.rate || "—"}</td></tr>`
+        `<tr><td>${esc(k.label)}</td><td>${esc(k.status)}</td><td>${k.rate ? esc(k.rate) : "—"}</td></tr>`
       ).join("") + "</tbody></table>";
     } else {
       known.innerHTML = "<p class='hint'>Nothing on file yet.</p>";
@@ -71,12 +86,12 @@
       return;
     }
     ul.innerHTML = rows.map((r) =>
-      `<li><span class="pill-soft">${r.status}</span> ${r.kind}
-        ${r.filename || r.url || ""}
-        ${r.findings_written ? " · " + r.findings_written + " finding(s)" : ""}
-        ${r.error ? "<div class='dim'>" + r.error + "</div>" : ""}
+      `<li><span class="pill-soft">${esc(r.status)}</span> ${esc(r.kind)}
+        ${esc(r.filename || r.url || "")}
+        ${r.findings_written ? " · " + esc(r.findings_written) + " finding(s)" : ""}
+        ${r.error ? "<div class='dim'>" + esc(r.error) + "</div>" : ""}
         ${r.status === "queued" || r.status === "failed"
-          ? `<button type="button" data-run="${r.id}">Process now</button>` : ""}
+          ? `<button type="button" data-run="${esc(r.id)}">Process now</button>` : ""}
       </li>`
     ).join("");
   }
@@ -112,11 +127,11 @@
       unknown: "Unknown",
     };
     st.innerHTML = (sess.statuses || Object.keys(labels)).map((s) =>
-      `<button type="button" class="chip ${cur === s ? "on" : ""}" data-status="${s}">${labels[s] || s}</button>`
+      `<button type="button" class="chip ${cur === s ? "on" : ""}" data-status="${esc(s)}">${esc(labels[s] || s)}</button>`
     ).join("");
     const unit = document.getElementById("q-rate-unit");
     unit.innerHTML = (sess.rate_units || []).map((u) =>
-      `<option value="${u}" ${u === (known && known.rate_unit) || u === sess.default_unit ? "selected" : ""}>${u}</option>`
+      `<option value="${esc(u)}" ${u === (known && known.rate_unit) || u === sess.default_unit ? "selected" : ""}>${esc(u)}</option>`
     ).join("");
     document.getElementById("q-rate-value").value = (known && known.rate_value) || "";
     document.getElementById("q-year").value = (known && known.fiscal_year) || "";
@@ -127,7 +142,7 @@
     toggleRate(cur);
     const cites = document.getElementById("q-cites");
     cites.innerHTML = sess.citations.map((c) =>
-      `<button type="button" class="chip" data-cite="${c.url}">${c.label}</button>`
+      `<button type="button" class="chip" data-cite="${esc(c.url)}">${esc(c.label)}</button>`
     ).join("") || "<span class='dim'>No crawled URLs yet — paste one, or skip.</span>";
   }
 
@@ -262,7 +277,7 @@
       const rows = await api("/api/jurisdictions?q=" + encodeURIComponent(q));
       box.hidden = rows.length === 0;
       box.innerHTML = rows.map((r) =>
-        `<li data-geoid="${r.geoid}" data-name="${r.name}" data-meta="${r.state_usps} ${r.kind}">${r.name} <span class="dim">${r.state_usps} ${r.kind} · ${r.geoid}</span></li>`
+        `<li data-geoid="${esc(r.geoid)}" data-name="${esc(r.name)}" data-meta="${esc(r.state_usps + " " + r.kind)}">${esc(r.name)} <span class="dim">${esc(r.state_usps)} ${esc(r.kind)} · ${esc(r.geoid)}</span></li>`
       ).join("");
     }, 200);
   });

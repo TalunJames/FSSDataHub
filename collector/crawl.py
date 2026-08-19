@@ -582,10 +582,21 @@ def is_document_url(url):
     return os_ext(urlparse(url).path or "") in (".pdf", ".csv", ".xls", ".xlsx")
 
 
+# How long a failed robots.txt fetch keeps a host closed in strict mode.
+# Permanent caching turned one transient timeout into a blacklist for the
+# life of the worker process.
+_ROBOTS_FAIL_TTL = 900.0
+
+
 def robots_allowed(client, url, user_agent, strict):
     parsed = urlparse(url)
     robots_url = "%s://%s/robots.txt" % (parsed.scheme, parsed.netloc)
     rp = _robots_cache.get(robots_url)
+    if isinstance(rp, tuple) and rp[0] == "fetch_failed":
+        if time.monotonic() - rp[1] < _ROBOTS_FAIL_TTL:
+            return False
+        _robots_cache.pop(robots_url, None)
+        rp = None
     if rp is None:
         rp = RobotFileParser()
         rp.set_url(robots_url)
@@ -597,16 +608,24 @@ def robots_allowed(client, url, user_agent, strict):
                 rp.parse([])
         except httpx.HTTPError:
             if strict:
-                _robots_cache[robots_url] = False
+                _robots_cache[robots_url] = ("fetch_failed", time.monotonic())
                 return False
             rp.parse([])
         _robots_cache[robots_url] = rp
-    if rp is False:
-        return False
     try:
         return rp.can_fetch(user_agent, url)
     except Exception:
         return not strict
+
+
+def _link_blob(url, anchor):
+    """The searchable form of a link: path, query, and anchor text.
+
+    Never the hostname — on tax.ohio.gov or a county taxcollector host,
+    matching the whole URL made every careers page, staff directory, and
+    press release on the site "relevant", and they ate the page budget."""
+    p = urlparse(url)
+    return "%s?%s %s" % (p.path or "", p.query or "", anchor or "")
 
 
 def looks_relevant(url, anchor=""):
@@ -614,7 +633,7 @@ def looks_relevant(url, anchor=""):
     ext = os_ext(path)
     if ext in SKIP_EXT:
         return False
-    blob = "%s %s" % (url, anchor or "")
+    blob = _link_blob(url, anchor)
     if RELEVANT.search(blob) or _matches_extra(blob):
         return True
     return ext in (".pdf", ".csv", ".xls", ".xlsx")
@@ -670,7 +689,20 @@ def _pdf_text(blob):
 
 
 def _html_text(blob):
-    html = blob if isinstance(blob, str) else blob.decode("utf-8", errors="replace")
+    if isinstance(blob, str):
+        html = blob
+    else:
+        # Charset-sniffed, not blindly UTF-8: older county sites serve
+        # windows-1252, where a blind decode turns "3½ mills" into "3�" and
+        # the fraction is gone before the extractor ever sees it.
+        html = None
+        try:
+            from bs4 import UnicodeDammit
+            html = UnicodeDammit(blob).unicode_markup
+        except Exception:
+            pass
+        if not html:
+            html = blob.decode("utf-8", errors="replace")
     try:
         import trafilatura
         extracted = trafilatura.extract(
@@ -758,6 +790,7 @@ def page_record(url, final_url, status, content_type, blob):
         "http_status": status,
         "content_type": content_type,
         "blob": blob,
+        "byte_size": len(blob),
         "sha256": hashlib.sha256(blob).hexdigest(),
         "robots_allowed": 1,
         "title": title,
@@ -770,7 +803,7 @@ def error_page(url, error, final_url=None, robots_allowed_flag=1):
     """A page that never yielded bytes, still worth recording as a gap."""
     return {
         "url": url, "final_url": final_url or url, "http_status": None,
-        "content_type": None, "blob": b"", "sha256": None,
+        "content_type": None, "blob": b"", "byte_size": 0, "sha256": None,
         "robots_allowed": robots_allowed_flag, "title": "", "text": "",
         "error": error,
     }
@@ -810,7 +843,7 @@ def record_page(conn, run_id, geoid, category, page, archive_id=None):
         "text_chars, error, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, geoid, category, page["url"], page.get("final_url"),
          page.get("http_status"), page.get("content_type"), page.get("sha256"),
-         len(page.get("blob") or b""), archive_id, page.get("robots_allowed", 1),
+         page_bytes(page), archive_id, page.get("robots_allowed", 1),
          (page.get("title") or "")[:300], len(page.get("text") or ""),
          page.get("error"), db.now()))
     conn.commit()
@@ -850,9 +883,10 @@ def should_follow(url, anchor, depth, category=None):
         return True
     if looks_relevant(url, anchor):
         return True
-    if category == "elections" and ELECTION_RELEVANT.search("%s %s" % (url, anchor or "")):
+    blob = _link_blob(url, anchor)
+    if category == "elections" and ELECTION_RELEVANT.search(blob):
         return True
-    if depth == 0 and DEPT.search("%s %s" % (url, anchor or "")):
+    if depth == 0 and DEPT.search(blob):
         return True
     return False
 
@@ -913,18 +947,40 @@ def content_filter_on(settings):
     return store.as_bool((settings or {}).get("content_filter", "1"))
 
 
+def page_bytes(p):
+    """Body size, surviving the blob being released after archiving."""
+    return p.get("byte_size") or len(p.get("blob") or b"")
+
+
+def is_document_page(p):
+    url = p.get("final_url") or p.get("url") or ""
+    return is_document_url(url) or "pdf" in (p.get("content_type") or "")
+
+
 def _has_signal(pages):
     """True if we already pulled a tax document or substantial tax text."""
     for p in pages:
-        url = p.get("final_url") or p.get("url") or ""
-        ctype = p.get("content_type") or ""
-        if is_document_url(url) or "pdf" in ctype:
-            if p.get("blob") and not p.get("error"):
+        if is_document_page(p):
+            if page_bytes(p) and not p.get("error"):
                 return True
         text = p.get("text") or ""
         if len(text) > 400 and RELEVANT.search(text):
             return True
     return False
+
+
+def combine_texts(entries, max_chars):
+    """Join page texts documents-first under the character cap.
+
+    entries are (is_doc, order, text). The cap cuts from the end, and the
+    nav-heavy seed pages arrive first — joined in fetch order, the
+    late-fetched rate PDF was exactly what "[truncated]" threw away.
+    """
+    ordered = sorted(entries, key=lambda e: (0 if e[0] else 1, e[1]))
+    combined = "\n\n-----\n\n".join(e[2] for e in ordered)
+    if len(combined) > max_chars:
+        combined = combined[:max_chars] + "\n\n[truncated]"
+    return combined
 
 
 def _enqueue(queue, seen, url, depth, cap, prefer=False):
@@ -969,8 +1025,13 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
             return fetcher.crawl_item(
                 conn, client, settings, run_id, geoid, category, name, state,
                 diag=diag)
-        except fetcher.Unavailable:
-            pass
+        except fetcher.Unavailable as exc:
+            # The fallback is invisible otherwise, and it re-runs the item's
+            # web searches — worth a line in the log if it starts happening
+            # on every item.
+            fetcher.log.warning(
+                "crawlee unavailable for %s/%s, using the legacy loop: %s",
+                geoid, category, exc)
     return crawl_item_legacy(
         conn, client, settings, run_id, geoid, category, name, state, diag=diag)
 
@@ -1024,10 +1085,15 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
 
     pages = []
     texts = []
+    text_shas = set()
     fetched = 0
+    attempted = 0
     extra_search = False
 
-    while fetched < max_pages:
+    # `fetched` counts pages that returned bytes: robots denials and
+    # connection errors used to burn the budget without fetching anything.
+    # `attempted` still bounds the loop so an all-error host cannot spin it.
+    while fetched < max_pages and attempted < max_pages * 3:
         if not queue:
             if extra_search or not do_search or _has_signal(pages):
                 break
@@ -1048,7 +1114,9 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
         if delay and fetched:
             time.sleep(delay)
         page = fetch_one(client, url, settings)
-        fetched += 1
+        attempted += 1
+        if page.get("blob"):
+            fetched += 1
         # An off-topic page is still logged and its links still followed;
         # only storage and model tokens are withheld from it.
         keep = keep_all or content_relevant(page, category)
@@ -1061,8 +1129,15 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
         record_page(conn, run_id, geoid, category, page, aid)
         pages.append(page)
         if keep and page.get("text") and not page.get("error"):
-            header = "URL: %s\nTITLE: %s\n" % (page.get("final_url") or url, page.get("title") or "")
-            texts.append(header + page["text"])
+            # Same bytes reached via www/non-www or a redirect variant would
+            # be sent to the model twice; one copy is plenty.
+            sha = page.get("sha256")
+            if not sha or sha not in text_shas:
+                if sha:
+                    text_shas.add(sha)
+                header = "URL: %s\nTITLE: %s\n" % (page.get("final_url") or url, page.get("title") or "")
+                texts.append((is_document_page(page), len(texts),
+                              header + page["text"]))
 
         final = page.get("final_url") or url
         final_host = (urlparse(final).hostname or "").lower()
@@ -1074,13 +1149,19 @@ def crawl_item_legacy(conn, client, settings, run_id, geoid, category, name, sta
                                                seed_hosts, name=name, state=state,
                                                category=category):
                 _enqueue(queue, seen, href, depth + 1, cap, prefer=prefer)
+        # The bytes are archived and their links harvested; keeping every
+        # blob until the item finished held up to 16 x 8MB per worker.
+        page["blob"] = b""
 
-    combined = "\n\n-----\n\n".join(texts)
-    if len(combined) > max_chars:
-        combined = combined[:max_chars] + "\n\n[truncated]"
-    return pages, combined
+    return pages, combine_texts(texts, max_chars)
 
 
 def _norm(url):
+    # The query string stays: document portals serve every PDF through one
+    # handler path with an id query (DocView.aspx?id=...), and dropping it
+    # collapsed all of them into the first one fetched. Only the fragment is
+    # noise, and html_links already strips that.
     p = urlparse(url)
-    return "%s://%s%s" % (p.scheme, (p.hostname or "").lower(), p.path.rstrip("/") or "/")
+    q = ("?" + p.query) if p.query else ""
+    return "%s://%s%s%s" % (p.scheme, (p.hostname or "").lower(),
+                            p.path.rstrip("/") or "/", q)

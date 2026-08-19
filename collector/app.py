@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import threading
+import time
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -241,6 +242,34 @@ def _stats(conn):
     }
 
 
+# /api/status is polled every few seconds by every open tab, and its dozen
+# counts plus the progress joins were re-run for each poll. A few seconds of
+# staleness is invisible on a dashboard; the constant background I/O on the
+# NAS was not. Saving settings resets the clock so changes show immediately.
+_status_cache = {"at": 0.0, "data": None}
+_status_lock = threading.Lock()
+_STATUS_TTL = 3.0
+
+
+def _status_snapshot():
+    now = time.monotonic()
+    with _status_lock:
+        if _status_cache["data"] and now - _status_cache["at"] < _STATUS_TTL:
+            return _status_cache["data"]
+    conn = store.connect()
+    try:
+        stats = _stats(conn)
+        s = store.get_all(conn)
+        progress = autopilot.progress(conn, s) if stats["ready"] else None
+    finally:
+        conn.close()
+    data = (stats, s, progress)
+    with _status_lock:
+        _status_cache["at"] = now
+        _status_cache["data"] = data
+    return data
+
+
 def _blockers(settings, stats):
     """The short list of things stopping unattended collection.
 
@@ -463,10 +492,15 @@ def review_page(request: Request, _: bool = Depends(_auth)):
     conn = store.connect()
     try:
         items = present.review_items(conn)
+        # The deck caps at 40; the closing card must not claim "that's the
+        # lot" while more are waiting.
+        review_total = conn.execute(
+            "SELECT COUNT(*) FROM work_item WHERE status='needs_review'"
+        ).fetchone()[0]
     finally:
         conn.close()
     return templates.TemplateResponse(request, "review.html", _ctx(
-        request, items=items, nav="review"))
+        request, items=items, review_total=review_total, nav="review"))
 
 
 @app.get("/record", response_class=HTMLResponse)
@@ -536,13 +570,7 @@ def queue_page(request: Request, state: str = "", status: str = "",
 
 @app.get("/api/status")
 def api_status(_: bool = Depends(_auth)):
-    conn = store.connect()
-    try:
-        stats = _stats(conn)
-        s = store.get_all(conn)
-        progress = autopilot.progress(conn, s) if stats["ready"] else None
-    finally:
-        conn.close()
+    stats, s, progress = _status_snapshot()
     snap = worker.snapshot()
     return {
         "stats": stats,
@@ -564,6 +592,7 @@ def api_status(_: bool = Depends(_auth)):
 @app.post("/api/settings")
 async def api_settings(request: Request, _: bool = Depends(_auth)):
     body = await request.json()
+    _status_cache["at"] = 0.0
     conn = store.connect()
     try:
         current = store.get_all(conn)
@@ -739,10 +768,13 @@ def api_autopilot_step(_: bool = Depends(_auth)):
     action, kwargs, label = plan
 
     def _go():
+        worker._set(state="running", mode="autopilot", step=label, message=label)
         try:
             worker.run_action(action, kwargs, settings)
-        except Exception:
-            pass
+            worker._set(state="idle", step="")
+        except (Exception, SystemExit) as exc:
+            worker._set(state="idle", step="",
+                        message="%s failed: %s" % (label, str(exc)[:300]))
 
     threading.Thread(target=_go, name="autopilot-step", daemon=True).start()
     return {"ok": True, "action": action, "label": label}
@@ -800,6 +832,24 @@ def api_init(_: bool = Depends(_auth)):
     return {"ok": True, "sources": n, "path": db.db_path()}
 
 
+def _spawn_job(label, fn):
+    """Run one named job on a thread, recording failure where the UI reads it.
+
+    worker.run_* acquire the job lock themselves and raise "collector is
+    busy" when another job holds it. The routes' snapshot pre-check is a fast
+    409 for the common case, but it reads a different signal than the lock,
+    so the race stays open — and an unhandled raise here died silently after
+    the route had already answered "started"."""
+    def _go():
+        try:
+            fn()
+        except (Exception, SystemExit) as exc:
+            worker._set(state="idle", step="",
+                        message="%s failed: %s" % (label, str(exc)[:300]))
+
+    threading.Thread(target=_go, name=label, daemon=True).start()
+
+
 @app.post("/api/seed")
 async def api_seed(request: Request, _: bool = Depends(_auth)):
     body = await request.json()
@@ -807,14 +857,11 @@ async def api_seed(request: Request, _: bool = Depends(_auth)):
     if snap.get("state") == "running":
         raise HTTPException(409, "collector is busy")
 
-    def _go():
-        worker.run_seed(
-            include_mcd=bool(body.get("include_mcd")),
-            counties_only=bool(body.get("counties_only")),
-            force=bool(body.get("force")),
-        )
-
-    threading.Thread(target=_go, name="seed", daemon=True).start()
+    _spawn_job("seed", lambda: worker.run_seed(
+        include_mcd=bool(body.get("include_mcd")),
+        counties_only=bool(body.get("counties_only")),
+        force=bool(body.get("force")),
+    ))
     return {"ok": True, "started": True}
 
 
@@ -846,10 +893,7 @@ async def api_sst(request: Request, _: bool = Depends(_auth)):
         raise HTTPException(409, "collector is busy")
     states = [x.strip().upper() for x in (body.get("states") or "").replace(",", " ").split() if x.strip()]
 
-    def _go():
-        worker.run_adapter("sst", states=states or None)
-
-    threading.Thread(target=_go, name="sst", daemon=True).start()
+    _spawn_job("sst", lambda: worker.run_adapter("sst", states=states or None))
     return {"ok": True, "started": True, "states": states}
 
 
@@ -860,10 +904,7 @@ async def api_cog(request: Request, _: bool = Depends(_auth)):
     if snap.get("state") == "running":
         raise HTTPException(409, "collector is busy")
 
-    def _go():
-        worker.run_cog(force=bool(body.get("force")))
-
-    threading.Thread(target=_go, name="cog", daemon=True).start()
+    _spawn_job("cog", lambda: worker.run_cog(force=bool(body.get("force"))))
     return {"ok": True, "started": True}
 
 
@@ -877,10 +918,8 @@ async def api_statutes(request: Request, _: bool = Depends(_auth)):
     if snap.get("state") == "running":
         raise HTTPException(409, "collector is busy")
 
-    def _go():
-        worker.run_statutes(usps, force=bool(body.get("force")))
-
-    threading.Thread(target=_go, name="statutes", daemon=True).start()
+    _spawn_job("statutes",
+               lambda: worker.run_statutes(usps, force=bool(body.get("force"))))
     return {"ok": True, "started": True, "state": usps}
 
 
@@ -1028,6 +1067,18 @@ def _fetch_url_sync(body, url):
 
 @app.get("/health")
 def health():
+    # Touch the database, not just the process: the common failure on the NAS
+    # is a missing or read-only dataset mount, which a liveness stub reported
+    # as healthy while every real request failed.
+    try:
+        conn = store.connect()
+        try:
+            conn.execute("SELECT 1").fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)[:200]},
+                            status_code=503)
     return {"ok": True}
 
 
@@ -1130,10 +1181,18 @@ async def api_intake_create(request: Request, _: bool = Depends(_auth)):
     conn = store.connect()
     ids = []
     try:
-        if url:
-            if not url.startswith("http"):
-                raise HTTPException(400, "url must be http(s)")
-            ids.append(intake.enqueue(conn, geoid, category, "url", url=url, note=note))
+        # An unseeded geoid used to pass here, commit the intake row, then
+        # 500 on the work_item foreign key — leaving a queued item no worker
+        # could process.
+        if not conn.execute("SELECT 1 FROM jurisdiction WHERE geoid=?",
+                            (geoid,)).fetchone():
+            raise HTTPException(400, "unknown jurisdiction — pick one from the search")
+        if url and not url.startswith("http"):
+            raise HTTPException(400, "url must be http(s)")
+        # Validate every file before queueing anything: enqueue() commits per
+        # item, so a bad third file used to leave the first two queued while
+        # the user saw only an error, retried, and duplicated them.
+        staged = []
         files = form.getlist("files") or form.getlist("file")
         for up in files:
             if not hasattr(up, "read"):
@@ -1147,11 +1206,15 @@ async def api_intake_create(request: Request, _: bool = Depends(_auth)):
             kind = intake.kind_of(ctype, up.filename or "")
             if not kind:
                 raise HTTPException(400, "unsupported file %s — use PDF or an image" % (up.filename or ""))
-            ids.append(intake.enqueue(
-                conn, geoid, category, kind, url=url, filename=up.filename,
-                blob=data, content_type=ctype, note=note))
-        if not ids:
+            staged.append((kind, up.filename, data, ctype))
+        if not url and not staged:
             raise HTTPException(400, "provide a URL or drop a PDF / image")
+        if url:
+            ids.append(intake.enqueue(conn, geoid, category, "url", url=url, note=note))
+        for kind, filename, data, ctype in staged:
+            ids.append(intake.enqueue(
+                conn, geoid, category, kind, url=url, filename=filename,
+                blob=data, content_type=ctype, note=note))
     finally:
         conn.close()
     return {"ok": True, "ids": ids, "queued": len(ids)}

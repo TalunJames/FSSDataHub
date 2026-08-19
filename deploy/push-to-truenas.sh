@@ -21,6 +21,8 @@ ssh "${USER}@${NAS}" "mkdir -p '${APP_DIR}' '${DATA_DIR}'"
 
 rsync -az --delete \
   --exclude '.git' \
+  --exclude '.env' \
+  --exclude '.pytest_cache/' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
   --exclude '.compose.truenas.generated.yml' \

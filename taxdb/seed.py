@@ -137,11 +137,21 @@ def seed(conn, kinds=("county", "place"), force=False, active_only=True):
             coterminous = 1 if (kind == "county" and usps == "VA"
                                 and "city" in name.lower()) else 0
 
+            # UPSERT, not REPLACE: an annual Gazetteer refresh updates only the
+            # Census-sourced columns and leaves hand-recorded notes alone.
             conn.execute(
-                "INSERT OR REPLACE INTO jurisdiction (geoid, kind, name, state_usps, "
+                "INSERT INTO jurisdiction (geoid, kind, name, state_usps, "
                 "state_fips, county_fips, parent_geoid, lsad, funcstat, population, "
                 "population_year, land_sqmi, lat, lon, coterminous) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(geoid) DO UPDATE SET "
+                "kind=excluded.kind, name=excluded.name, "
+                "state_usps=excluded.state_usps, state_fips=excluded.state_fips, "
+                "county_fips=excluded.county_fips, parent_geoid=excluded.parent_geoid, "
+                "lsad=excluded.lsad, funcstat=excluded.funcstat, "
+                "population=excluded.population, population_year=excluded.population_year, "
+                "land_sqmi=excluded.land_sqmi, lat=excluded.lat, lon=excluded.lon, "
+                "coterminous=excluded.coterminous",
                 (geoid, kind, name, usps, fips, county_fips, parent,
                  row.get("LSAD"), funcstat, pops.get(geoid), POP_YEAR,
                  _f(row.get("ALAND_SQMI")), _f(row.get("INTPTLAT")),
@@ -158,9 +168,15 @@ def _seed_states(conn, pops=None):
     pops = pops or {}
     for fips, usps in FIPS_TO_USPS.items():
         conn.execute(
-            "INSERT OR REPLACE INTO jurisdiction (geoid, kind, name, state_usps, "
+            "INSERT INTO jurisdiction (geoid, kind, name, state_usps, "
             "state_fips, parent_geoid, funcstat, population, population_year) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(geoid) DO UPDATE SET "
+            "kind=excluded.kind, name=excluded.name, "
+            "state_usps=excluded.state_usps, state_fips=excluded.state_fips, "
+            "parent_geoid=excluded.parent_geoid, funcstat=excluded.funcstat, "
+            "population=excluded.population, "
+            "population_year=excluded.population_year",
             (fips, "state", STATE_NAMES.get(usps, usps), usps, fips, None, "A",
              pops.get(fips), POP_YEAR if fips in pops else None),
         )

@@ -123,13 +123,16 @@ def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>",
     for key, table, validator in SECTIONS:
         ok[key] = []
         for i, row in enumerate(_rows_of(doc, key)):
+            check_row = row
             if key == "measures":
-                # Derive first: the checks on vote arithmetic and on
-                # "passed below its own threshold" are only meaningful once
-                # the implied total and the applicable threshold are filled in.
-                row = derive_measure(conn, dict(row))
-            errs = list(validator(row, i))
-            errs.extend(_context_errors(conn, key, row, i))
+                # Derive a throwaway copy: the checks on vote arithmetic and
+                # "passed below its own threshold" need the implied total and
+                # threshold filled in, but the stored row is derived later in
+                # _write_measures — after this document's own threshold rows
+                # have landed, so a correction in the same document takes.
+                check_row = derive_measure(conn, dict(row))
+            errs = list(validator(check_row, i))
+            errs.extend(_context_errors(conn, key, check_row, i))
             if errs:
                 errors.extend(errs)
             else:
@@ -176,7 +179,7 @@ def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>",
 
     for geoid, cat in ctx.touched:
         _touch_work_item(conn, geoid, cat)
-    ledger.park_bulk_covered(conn)
+    ledger.park_bulk_covered(conn, pairs=ctx.touched, commit=False)
     conn.commit()
 
     return {
@@ -186,6 +189,7 @@ def load_doc(conn, doc, dry_run=False, allow_partial=False, label="<doc>",
         "by_type": by_type,
         "jurisdictions": len({g for g, _ in ctx.touched}),
         "errors": errors,
+        "claim_ids": ctx.claims,
     }
 
 
@@ -248,6 +252,9 @@ class _Ctx:
         self.method = method
         self.touched = set()
         self.measured = set()
+        # Row ids written (inserted or updated) per table, so the second
+        # checker can judge exactly this document's rows and nothing else.
+        self.claims = {}
 
     def source_id(self, row, scope_geoid=None):
         src = row["source"]
@@ -261,6 +268,7 @@ class _Ctx:
 
     def cite(self, table, claim_id, row, primary_source_id):
         """Record provenance in claim_source: the primary plus any corroboration."""
+        self.claims.setdefault(table, set()).add(claim_id)
         _claim_source(self.conn, table, claim_id, primary_source_id, "primary",
                       row, self.retrieved_at)
         for extra in row.get("corroborating_sources") or []:
@@ -379,16 +387,27 @@ def _write_measures(ctx, rows):
         values["researcher"] = m.get("researcher") or ctx.researcher
         values["retrieved_at"] = m.get("retrieved_at") or ctx.retrieved_at
 
-        old = conn.execute(
-            "SELECT id FROM ballot_measure WHERE geoid=? AND election_date=? "
-            "AND ifnull(measure_id_local,'')=ifnull(?,'')",
-            (m["geoid"], m["election_date"], m.get("measure_id_local"))).fetchone()
+        if m.get("measure_id_local") is not None:
+            old = conn.execute(
+                "SELECT id FROM ballot_measure WHERE geoid=? AND election_date=? "
+                "AND measure_id_local=?",
+                (m["geoid"], m["election_date"], m["measure_id_local"])).fetchone()
+        else:
+            # No local ID: two measures can share a ballot, so only the title
+            # separates them. Matching every NULL-ID row here would merge a
+            # parks levy into a fire levy.
+            old = conn.execute(
+                "SELECT id FROM ballot_measure WHERE geoid=? AND election_date=? "
+                "AND measure_id_local IS NULL "
+                "AND ifnull(official_title,'')=ifnull(?,'')",
+                (m["geoid"], m["election_date"], m.get("official_title"))).fetchone()
         if old:
             # Fill blanks and accept corrections, but never blank out a column
             # that already holds a value with an explicit null.
             sets = [c for c in MEASURE_COLS if values.get(c) is not None]
             conn.execute(
-                "UPDATE ballot_measure SET %s, source_id=?, archive_file_id=? WHERE id=?"
+                "UPDATE ballot_measure SET %s, source_id=?, "
+                "archive_file_id=COALESCE(?, archive_file_id) WHERE id=?"
                 % ", ".join("%s=?" % c for c in sets),
                 [values[c] for c in sets]
                 + [source_id, m.get("archive_file_id"), old["id"]])
@@ -457,8 +476,13 @@ def derive_measure(conn, m):
             if m.get("threshold_basis") is None:
                 m["threshold_basis"] = rule["threshold_basis"]
 
+    # pct_yes is a share of votes cast; only compare it against thresholds on
+    # the same denominator. A registered-voters or dual-majority rule needs
+    # arithmetic this row does not carry, so leave the margin unfilled.
+    basis = m.get("threshold_basis")
     if m.get("margin_vs_threshold") is None and _isnum(m.get("pct_yes")) \
-            and _isnum(m.get("threshold_required")):
+            and _isnum(m.get("threshold_required")) \
+            and basis in (None, "votes_cast", "votes_cast_plus_turnout_validation"):
         m["margin_vs_threshold"] = round(m["pct_yes"] - m["threshold_required"], 4)
     return m
 
@@ -467,7 +491,10 @@ def threshold_for(conn, m):
     """The threshold_rule in force for this measure on its election date.
 
     Most specific first: the jurisdiction's own kind beats a statewide default,
-    and a purpose-specific rule beats 'either'.
+    an instrument-specific rule beats a general one, and a purpose-specific
+    rule beats 'either'. A rule written for a different instrument never
+    applies — a transit-district supermajority must not attach to a county
+    general sales measure.
     """
     j = conn.execute("SELECT state_usps, kind FROM jurisdiction WHERE geoid=?",
                      (m.get("geoid"),)).fetchone()
@@ -476,18 +503,22 @@ def threshold_for(conn, m):
     purpose = m.get("purpose_type")
     purposes = [purpose, "either", None] if purpose in ("general", "special") \
         else ["either", None]
+    inst = m.get("instrument_code")
+    instruments = [inst, None] if inst else [None]
     for kind in (j["kind"], None):
-        for pur in purposes:
-            row = conn.execute(
-                "SELECT * FROM threshold_rule WHERE state_usps=? AND measure_class=? "
-                "AND (jurisdiction_kind IS ?) AND (purpose_restriction IS ?) "
-                "AND (effective_from IS NULL OR effective_from <= ?) "
-                "AND (effective_to IS NULL OR effective_to >= ?) "
-                "ORDER BY COALESCE(effective_from,'0000') DESC, id DESC LIMIT 1",
-                (j["state_usps"], m.get("measure_class"), kind, pur,
-                 m.get("election_date"), m.get("election_date"))).fetchone()
-            if row:
-                return row
+        for ins in instruments:
+            for pur in purposes:
+                row = conn.execute(
+                    "SELECT * FROM threshold_rule WHERE state_usps=? AND measure_class=? "
+                    "AND (jurisdiction_kind IS ?) AND (instrument_code IS ?) "
+                    "AND (purpose_restriction IS ?) "
+                    "AND (effective_from IS NULL OR effective_from <= ?) "
+                    "AND (effective_to IS NULL OR effective_to >= ?) "
+                    "ORDER BY COALESCE(effective_from,'0000') DESC, id DESC LIMIT 1",
+                    (j["state_usps"], m.get("measure_class"), kind, ins, pur,
+                     m.get("election_date"), m.get("election_date"))).fetchone()
+                if row:
+                    return row
     return None
 
 
@@ -525,7 +556,8 @@ def _write_thresholds(ctx, rows):
         if old:
             sets = [c for c in THRESHOLD_COLS if values.get(c) is not None]
             conn.execute(
-                "UPDATE threshold_rule SET %s, source_id=?, archive_file_id=? WHERE id=?"
+                "UPDATE threshold_rule SET %s, source_id=?, "
+                "archive_file_id=COALESCE(?, archive_file_id) WHERE id=?"
                 % ", ".join("%s=?" % c for c in sets),
                 [values[c] for c in sets]
                 + [source_id, t.get("archive_file_id"), old["id"]])
@@ -573,7 +605,8 @@ def _write_grants(ctx, rows):
         if old:
             sets = [c for c in GRANT_COLS if values.get(c) is not None]
             conn.execute(
-                "UPDATE authority_grant SET %s, source_id=?, archive_file_id=? WHERE id=?"
+                "UPDATE authority_grant SET %s, source_id=?, "
+                "archive_file_id=COALESCE(?, archive_file_id) WHERE id=?"
                 % ", ".join("%s=?" % c for c in sets),
                 [values[c] for c in sets]
                 + [source_id, g.get("archive_file_id"), old["id"]])
@@ -773,22 +806,26 @@ def verify(conn):
         "AND (source_quote IS NULL OR trim(source_quote)='')")
 
     missing_quote = []
-    blob_cache = {}
+    # Ordered by file so one normalized blob is in memory at a time: an
+    # unbounded cache held up to 2MB per distinct archive file, which at
+    # national scale is gigabytes for one verify pass.
     qrows = conn.execute(
         "SELECT t.id, t.geoid, t.source_quote, a.store_path FROM tax_instrument t "
         "JOIN archive_file a ON a.id = t.archive_file_id "
         "WHERE t.superseded_by IS NULL AND t.source_quote IS NOT NULL "
-        "AND trim(t.source_quote) != ''"
+        "AND trim(t.source_quote) != '' ORDER BY a.store_path"
     ).fetchall()
+    current_path, current_text = None, ""
     for r in qrows:
         path = r["store_path"]
-        if path not in blob_cache:
+        if path != current_path:
             # Whitespace-insensitive: PDF and HTML extraction mangle line
             # breaks and runs of spaces often enough that an exact match
             # flags correct quotes.
-            blob_cache[path] = re.sub(r"\s+", " ", _archive_text(path))
+            current_path = path
+            current_text = re.sub(r"\s+", " ", _archive_text(path))
         quote = re.sub(r"\s+", " ", r["source_quote"]).strip()
-        if quote and quote not in blob_cache[path]:
+        if quote and quote not in current_text:
             missing_quote.append((r["id"], r["geoid"]))
     checks.append(("source_quote not found in archived bytes",
                    len(missing_quote), missing_quote[:8]))

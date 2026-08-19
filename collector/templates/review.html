@@ -176,8 +176,14 @@
 {% endfor %}
 
 <div class="all-clear" id="all-clear" {% if items %}hidden{% endif %}>
+  {% if review_total and review_total > items|length %}
+  <div class="big">That's this batch.</div>
+  <p>{{ "{:,}".format(review_total - items|length) }} more were waiting when this page loaded.</p>
+  <a class="btn btn-primary" href="/review" style="margin-top:26px;font-size:15px;padding:11px 20px">Next batch</a>
+  {% else %}
   <div class="big">That's the lot.</div>
   <p>Everything else the crawler found passed the automatic check and is already in the database.</p>
   <a class="btn btn-primary" href="/" style="margin-top:26px;font-size:15px;padding:11px 20px">Back to today</a>
+  {% endif %}
 </div>
 {% endblock %}

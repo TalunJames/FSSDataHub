@@ -39,8 +39,23 @@ def put(conn, adapter, url, blob, period_label, period_start=None, period_end=No
         "WHERE adapter=? AND period_label=? AND url=?",
         (adapter, period_label, url),
     ).fetchone()
-    if existing:
+    if existing and existing["sha256"] == sha:
         return existing["id"], existing["sha256"], existing["store_path"], False
+    if existing:
+        # Same key, different bytes: the document changed since it was last
+        # archived. Rows are immutable and the base key is taken, so the new
+        # bytes go under a content-versioned label — returning the stale row
+        # here meant a re-crawled rate PDF's evidence trail pointed at the
+        # old rates forever.
+        period_label = "%s@%s" % (period_label, sha[:12])
+        path = store_path(adapter, period_label, sha, filename)
+        versioned = conn.execute(
+            "SELECT id, sha256, store_path FROM archive_file "
+            "WHERE adapter=? AND period_label=? AND url=?",
+            (adapter, period_label, url),
+        ).fetchone()
+        if versioned:
+            return versioned["id"], versioned["sha256"], versioned["store_path"], False
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path):

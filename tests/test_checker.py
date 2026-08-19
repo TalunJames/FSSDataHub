@@ -92,6 +92,34 @@ class DeterministicFlagTests(unittest.TestCase):
         self.assertIn("over_cap", [f["code"] for f in flags])
 
 
+class ExcerptTests(DbTest):
+    def setUp(self):
+        super().setUp()
+        try:
+            from collector import check
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.checkmod = check
+
+    def test_long_doc_is_trimmed_around_the_quote(self):
+        quote = "the sales tax rate is 1.5 percent"
+        doc = ("nav " * 8000) + quote + (" footer" * 8000)
+        rows = [{"source_quote": quote}]
+        out = self.checkmod.excerpt_doc(doc, rows, max_chars=80000)
+        self.assertIn(quote, out)
+        self.assertLess(len(out), 12000)
+
+    def test_short_doc_passes_through(self):
+        doc = "short page mentioning a rate"
+        out = self.checkmod.excerpt_doc(doc, [{"source_quote": "rate"}], 80000)
+        self.assertEqual(out, doc)
+
+    def test_no_anchor_falls_back_to_the_head(self):
+        doc = "x" * 100000
+        out = self.checkmod.excerpt_doc(doc, [{"source_quote": "absent"}], 20000)
+        self.assertEqual(out, doc[:20000])
+
+
 class RunAndApplyTests(DbTest):
     def setUp(self):
         super().setUp()
@@ -162,6 +190,38 @@ class RunAndApplyTests(DbTest):
                 self.conn, self._settings(), None, self.geoid, "sales_use",
                 self.doc_text)
         self.assertEqual(verdict, "error")
+        self.assertEqual(self._status()["status"], "needs_review")
+
+    def test_empty_verdicts_array_fails_toward_review(self):
+        """{"verdicts": []} is parseable and says nothing about the finding.
+        Treating it as a clean pass was the trust inversion the design
+        forbids — a small local model drifts to shapes like this."""
+        raw = json.dumps({"verdicts": []})
+        with mock.patch("collector.extract.chat", return_value=(raw, None)):
+            verdict, _ = self.checkmod.run_and_apply(
+                self.conn, self._settings(), None, self.geoid, "sales_use",
+                self.doc_text)
+        self.assertEqual(verdict, "error")
+        self.assertEqual(self._status()["status"], "needs_review")
+
+    def test_wrong_shape_fails_toward_review(self):
+        raw = json.dumps({"results": [{"verdict": "pass"}]})
+        with mock.patch("collector.extract.chat", return_value=(raw, None)):
+            verdict, _ = self.checkmod.run_and_apply(
+                self.conn, self._settings(), None, self.geoid, "sales_use",
+                self.doc_text)
+        self.assertEqual(verdict, "error")
+        self.assertEqual(self._status()["status"], "needs_review")
+
+    def test_nonstandard_verdict_word_counts_as_flag(self):
+        raw = json.dumps({"verdicts": [
+            {"instrument_code": "municipal_general_sales",
+             "verdict": "flagged", "reason": "unsure"}]})
+        with mock.patch("collector.extract.chat", return_value=(raw, None)):
+            verdict, _ = self.checkmod.run_and_apply(
+                self.conn, self._settings(), None, self.geoid, "sales_use",
+                self.doc_text)
+        self.assertEqual(verdict, "flag")
         self.assertEqual(self._status()["status"], "needs_review")
 
     def test_no_provider_fails_toward_review(self):

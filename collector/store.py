@@ -242,6 +242,14 @@ def sanitize_updates(current, body):
     writing it back would destroy the stored key.
     """
     updates = {}
+    # Explicit clears first, so a new value posted alongside still wins.
+    # "Empty means unchanged" protects stored keys from every ordinary save,
+    # which also meant a wrong or revoked key could never be removed from
+    # the UI; <key>__clear is the deliberate act the empty field cannot be.
+    for k, v in body.items():
+        if k.endswith("__clear") and k[:-len("__clear")] in SECRET_KEYS:
+            if isinstance(v, (str, bool, int)) and str(v) not in ("", "0", "False"):
+                updates[k[:-len("__clear")]] = ""
     for k, v in body.items():
         if k not in current and k not in SECRET_KEYS:
             continue

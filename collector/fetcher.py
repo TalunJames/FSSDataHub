@@ -21,6 +21,7 @@ import functools
 import logging
 import os
 import threading
+import uuid
 from datetime import timedelta
 from urllib.parse import urlparse
 
@@ -138,6 +139,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
     ctx = {
         "pages": [],
         "texts": [],
+        "text_shas": set(),
         "seed_hosts": crawl.seed_hosts_for(seed_urls),
         "thin": [],
     }
@@ -152,10 +154,7 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
             raise Unavailable(str(exc))
         log.warning("crawlee run for %s/%s ended early: %s", geoid, category, exc)
 
-    combined = "\n\n-----\n\n".join(ctx["texts"])
-    if len(combined) > plan["max_chars"]:
-        combined = combined[:plan["max_chars"]] + "\n\n[truncated]"
-    return ctx["pages"], combined
+    return ctx["pages"], crawl.combine_texts(ctx["texts"], plan["max_chars"])
 
 
 async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
@@ -184,6 +183,28 @@ async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
         await _render_round(conn, plan, run_id, geoid, category, ctx)
 
 
+async def _fresh_queue():
+    """A request queue of our own, for exactly one crawler round.
+
+    Crawlee caches storage instances process-wide by (alias, storage_dir),
+    and the shared default queue broke two ways. First, `asyncio.run` per
+    item means the cached queue's lock is bound to a previous item's closed
+    event loop, so every item after the first crashed and fell back to the
+    legacy loop — silently, re-running its web searches. Second, pending
+    requests left when one round hit its budget bled into the next round and
+    the browser round, which then spent their budgets on someone else's URLs.
+    A unique alias sidesteps the cache; drop() deletes the queue and evicts
+    the instance when the round is done.
+    """
+    from crawlee.configuration import Configuration
+    from crawlee.storages import RequestQueue
+
+    return await RequestQueue.open(
+        alias="round-%s" % uuid.uuid4().hex,
+        configuration=Configuration(storage_dir=storage_dir(),
+                                    purge_on_start=True))
+
+
 def _crawler_kwargs(plan, budget):
     from crawlee import ConcurrencySettings
     from crawlee.configuration import Configuration
@@ -191,6 +212,11 @@ def _crawler_kwargs(plan, budget):
     return {
         "max_requests_per_crawl": budget,
         "max_request_retries": plan["retries"],
+        # A blocked response (401/403/429) from a government site is the
+        # site's answer, not a fingerprint problem: every rotated session
+        # comes from the same address with the same honest UA, so the
+        # default ten rotations were ten identical fetches.
+        "max_session_rotations": 1,
         # Crawlee checks robots.txt for every request when this is on, which
         # is what the old loop did on its own. Note it treats an unreachable
         # robots.txt as permissive; `strict_robots` fail-closed behaviour
@@ -239,7 +265,9 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
         return
 
     try:
+        rq = await _fresh_queue()
         crawler = HttpCrawler(http_client=_http_client(plan),
+                              request_manager=rq,
                               **_crawler_kwargs(plan, budget))
     except Exception as exc:
         raise Unavailable("could not start HttpCrawler: %s" % exc)
@@ -292,9 +320,15 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
         page = crawl.error_page(context.request.url, str(error)[:400])
         _keep(conn, run_id, geoid, category, page, ctx, plan, archive=False)
 
-    await crawler.run([
-        Request.from_url(u, user_data={"depth": 0}) for u in urls
-    ])
+    try:
+        await crawler.run([
+            Request.from_url(u, user_data={"depth": 0}) for u in urls
+        ])
+    finally:
+        try:
+            await rq.drop()
+        except Exception:
+            pass
 
 
 async def _render_round(conn, plan, run_id, geoid, category, ctx):
@@ -309,6 +343,7 @@ async def _render_round(conn, plan, run_id, geoid, category, ctx):
         return
 
     try:
+        rq = await _fresh_queue()
         crawler = PlaywrightCrawler(
             headless=True,
             browser_type="chromium",
@@ -317,6 +352,7 @@ async def _render_round(conn, plan, run_id, geoid, category, ctx):
             # nothing from them is executed outside the browser, but this is
             # the one place we give up a layer of isolation.
             browser_launch_options={"args": ["--no-sandbox"]},
+            request_manager=rq,
             **_crawler_kwargs(plan, len(urls)))
     except Exception as exc:
         _browser_broken = True
@@ -343,6 +379,11 @@ async def _render_round(conn, plan, run_id, geoid, category, ctx):
     except Exception as exc:
         _browser_broken = True
         log.warning("browser pass failed, staying with HTTP text: %s", exc)
+    finally:
+        try:
+            await rq.drop()
+        except Exception:
+            pass
 
 
 def _keep(conn, run_id, geoid, category, page, ctx, plan, archive=True,
@@ -363,14 +404,25 @@ def _keep(conn, run_id, geoid, category, page, ctx, plan, archive=True,
     ctx["pages"].append(page)
 
     if keep and page.get("text") and not page.get("error"):
-        header = "URL: %s\nTITLE: %s\n" % (
-            page.get("final_url") or page["url"], page.get("title") or "")
-        if page.get("rendered"):
-            header += "NOTE: rendered in a browser\n"
-        ctx["texts"].append(header + page["text"])
+        # Same bytes reached via www/non-www or a redirect variant would be
+        # sent to the model twice; one copy is plenty.
+        sha = page.get("sha256")
+        if not sha or sha not in ctx["text_shas"]:
+            if sha:
+                ctx["text_shas"].add(sha)
+            header = "URL: %s\nTITLE: %s\n" % (
+                page.get("final_url") or page["url"], page.get("title") or "")
+            if page.get("rendered"):
+                header += "NOTE: rendered in a browser\n"
+            ctx["texts"].append((crawl.is_document_page(page),
+                                 len(ctx["texts"]), header + page["text"]))
 
     if _is_thin(page, plan):
         ctx["thin"].append(page.get("final_url") or page["url"])
+    # The bytes are archived and the caller's handler keeps its own reference
+    # for link harvesting; holding every blob here kept up to 16 x 8MB per
+    # worker in memory until the item completed.
+    page["blob"] = b""
 
 
 def _is_thin(page, plan):
@@ -381,7 +433,9 @@ def _is_thin(page, plan):
     is gone by now — a URL-only re-test would starve JS rate pages whose
     address is as plain as /rates.
     """
-    if page.get("rendered") or page.get("error") or not page.get("blob"):
+    from . import crawl
+
+    if page.get("rendered") or page.get("error") or not crawl.page_bytes(page):
         return False
     if "html" not in (page.get("content_type") or ""):
         return False
