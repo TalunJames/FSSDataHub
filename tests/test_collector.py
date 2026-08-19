@@ -192,9 +192,27 @@ class EngineSelectionTests(unittest.TestCase):
             self.fetcher.available())
 
     def test_delay_becomes_rate_cap(self):
-        self.assertAlmostEqual(self.fetcher._tasks_per_minute({"delay_seconds": "2.0"}), 30.0)
-        self.assertAlmostEqual(self.fetcher._tasks_per_minute({"delay_seconds": "0.5"}), 120.0)
-        self.assertEqual(self.fetcher._tasks_per_minute({"delay_seconds": "0"}), float("inf"))
+        # Per-item rate, so the pool size is part of the sum: the ceiling the
+        # setting describes is global. See test_request_ceiling_is_global.
+        one = {"delay_seconds": "2.0", "workers": "1"}
+        self.assertAlmostEqual(self.fetcher._tasks_per_minute(one), 30.0)
+        self.assertAlmostEqual(self.fetcher._tasks_per_minute(
+            {"delay_seconds": "0.5", "workers": "1"}), 120.0)
+        self.assertEqual(self.fetcher._tasks_per_minute({"delay_seconds": "0"}),
+                         float("inf"))
+        self.assertAlmostEqual(self.fetcher._tasks_per_minute(
+            {"delay_seconds": "2.0", "workers": "6"}) * 6, 30.0)
+
+    def test_pool_size_has_one_definition(self):
+        """The pool and the rate divisor must not drift apart."""
+        from collector import store, worker
+        for n in ("1", "4", "9"):
+            self.assertEqual(worker.worker_count({"workers": n}),
+                             store.worker_count({"workers": n}))
+        self.assertEqual(store.worker_count({}),
+                         int(store.DEFAULTS["workers"]))
+        self.assertEqual(store.worker_count({"workers": "999"}), 32)
+        self.assertEqual(store.worker_count({"workers": "0"}), 1)
 
     def test_thin_html_marked_for_render(self):
         plan = {"render_min": 400}
@@ -345,3 +363,47 @@ class InterviewTests(DbTest):
         sess2 = self.interview.session(self.conn, self.geoid, "sales_use")
         self.assertIsNone(sess2["question"])
         self.assertEqual(sess2["remaining"], 0)
+
+
+class AnthropicTuningTests(unittest.TestCase):
+    """Thinking and effort are model-specific; the wrong pair is a 400."""
+
+    def setUp(self):
+        try:
+            from collector import extract
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.extract = extract
+
+    def test_five_generation_gets_adaptive_thinking_and_effort(self):
+        body = self.extract.anthropic_tuning("claude-sonnet-5")
+        self.assertEqual(body["thinking"], {"type": "adaptive"})
+        self.assertIn("effort", body["output_config"])
+
+    def test_four_five_generation_gets_neither(self):
+        # Adaptive thinking and effort are rejected outright by these models.
+        self.assertEqual(self.extract.anthropic_tuning("claude-haiku-4-5"), {})
+
+    def test_unknown_model_falls_back_to_what_everything_accepts(self):
+        # The model field is free text. A typo must not 400 every item.
+        self.assertEqual(self.extract.anthropic_tuning("claude-sonnet-9000"), {})
+
+    def test_thinking_is_always_explicit_for_capable_models(self):
+        """Omitting it means adaptive on the 5 generation, and max_tokens caps
+        thinking and the answer together — a silent truncation risk."""
+        for model in ("claude-sonnet-5", "claude-opus-5"):
+            self.assertIn("thinking", self.extract.anthropic_tuning(model))
+
+    def test_checker_thinks_harder_than_the_extractor(self):
+        levels = ["low", "medium", "high", "xhigh", "max"]
+        self.assertGreater(levels.index(self.extract.DEFAULT_CHECKER_EFFORT),
+                           levels.index(self.extract.DEFAULT_EFFORT))
+
+    def test_stale_prompt_caching_beta_header_is_gone(self):
+        import inspect
+        src = inspect.getsource(self.extract._anthropic)
+        self.assertNotIn("prompt-caching-2024-07-31", src)
+
+    def test_extractor_asks_for_tier_and_corroboration(self):
+        self.assertIn("authority_tier", self.extract.SYSTEM)
+        self.assertIn("corroborating_sources", self.extract.SYSTEM)

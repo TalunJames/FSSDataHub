@@ -58,6 +58,54 @@ def _migrate(conn):
     _ensure_column(conn, "source", "content_sha256", "TEXT")
     _ensure_column(conn, "source", "content_changed", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "tax_instrument", "source_quote", "TEXT")
+    _allow_awaiting_ai(conn)
+
+
+def _allow_awaiting_ai(conn):
+    """Let existing databases park an item on a batch extraction.
+
+    The status list is a CHECK constraint baked into the table at creation, so
+    an older tax.db rejects 'awaiting_ai' and batch mode would fail on its
+    first item. CREATE TABLE IF NOT EXISTS cannot retrofit a constraint, so the
+    table is rebuilt once.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item'"
+    ).fetchone()
+    if not row or "awaiting_ai" in (row["sql"] or ""):
+        return
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    # Keeps the rename from rewriting other tables' references to work_item.
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    conn.execute("ALTER TABLE work_item RENAME TO work_item_old")
+    conn.execute(
+        "CREATE TABLE work_item ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " geoid TEXT NOT NULL REFERENCES jurisdiction(geoid),"
+        " category TEXT NOT NULL,"
+        " status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ("
+        "     'pending','in_progress','needs_review',"
+        "     'complete','no_data','blocked','awaiting_ai')),"
+        " priority INTEGER NOT NULL DEFAULT 0,"
+        " batch TEXT,"
+        " attempts INTEGER NOT NULL DEFAULT 0,"
+        " last_error TEXT,"
+        " claimed_at TEXT,"
+        " completed_at TEXT,"
+        " updated_at TEXT,"
+        " UNIQUE(geoid, category))")
+    cols = ("id, geoid, category, status, priority, batch, attempts, "
+            "last_error, claimed_at, completed_at, updated_at")
+    conn.execute("INSERT INTO work_item (%s) SELECT %s FROM work_item_old"
+                 % (cols, cols))
+    conn.execute("DROP TABLE work_item_old")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_work_queue "
+                 "ON work_item(status, priority DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_work_batch ON work_item(batch)")
+    conn.execute("PRAGMA legacy_alter_table=OFF")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
 
 
 def _ensure_column(conn, table, column, decl):

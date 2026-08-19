@@ -44,6 +44,14 @@ Rules:
 - For measures, record the vote counts as printed and let the percentage be
   computed. Certified results only, never election-night returns.
 - For thresholds and grants, the statutory cite is required.
+- Set source.authority_tier from what you actually read: 1 for statute, code
+  or ordinance text, 2 for the agency of record (a state revenue department, a
+  county auditor or elections office), 3 for a university or association
+  compilation, 4 for a commercial aggregator. Do not leave it blank.
+- When a second document supports the same figure, list it under
+  corroborating_sources as [{"url": ..., "name": ...}]. A rate confirmed by
+  the ordinance and the rate table is worth more than either alone, and this
+  is what lets a row be used with a client.
 - Return ONLY valid JSON matching the schema in the user message.
 - If the documents do not support a row, omit it rather than guess. An empty
   array is a real answer.
@@ -54,6 +62,58 @@ Rules:
 # none of them under "findings", so accepting only that key silently threw
 # away every threshold and every measure a model found.
 SECTION_KEYS = ("findings", "measures", "thresholds", "grants", "profile")
+
+
+# What each Anthropic model accepts. These are not interchangeable: adaptive
+# thinking and `effort` are rejected outright by the 4.5-generation models,
+# which still take the old fixed thinking budget. Sending the wrong pair is a
+# 400, so the shape is looked up rather than assumed.
+ANTHROPIC_CAPS = {
+    "claude-opus-5":    {"adaptive": True,  "effort": True},
+    "claude-sonnet-5":  {"adaptive": True,  "effort": True},
+    "claude-opus-4-8":  {"adaptive": True,  "effort": True},
+    "claude-opus-4-7":  {"adaptive": True,  "effort": True},
+    "claude-sonnet-4-6": {"adaptive": True, "effort": True},
+    "claude-opus-4-6":  {"adaptive": True,  "effort": True},
+    "claude-haiku-4-5": {"adaptive": False, "effort": False},
+    "claude-sonnet-4-5": {"adaptive": False, "effort": False},
+}
+
+# Effort is the cost and latency dial. Extraction is transcription with
+# judgement about units and status, not open reasoning, so it does not need to
+# think hard. The checker is the opposite: its whole job is to be skeptical,
+# and a checker that rubber-stamps is worse than no checker.
+DEFAULT_EFFORT = "low"
+DEFAULT_CHECKER_EFFORT = "medium"
+
+
+def anthropic_caps(model):
+    """Capabilities for a model, defaulting to the conservative shape.
+
+    An unknown model string (the field is free text) gets no thinking and no
+    effort, which every model accepts. Guessing the other way turns a typo
+    into a 400 on every item.
+    """
+    return ANTHROPIC_CAPS.get((model or "").strip(),
+                              {"adaptive": False, "effort": False})
+
+
+def anthropic_tuning(model, effort=None, max_tokens=8192):
+    """Thinking and effort parameters for one Anthropic call.
+
+    Thinking is on by default on the 5-generation models when the parameter is
+    omitted, and `max_tokens` caps thinking and the answer together. Left
+    alone, a findings-heavy page can spend the budget reasoning and return
+    truncated JSON, which fails the parse, sends the item back to the queue,
+    and burns an attempt. So thinking is always explicit here.
+    """
+    caps = anthropic_caps(model)
+    body = {}
+    if caps["adaptive"]:
+        body["thinking"] = {"type": "adaptive"}
+    if caps["effort"]:
+        body["output_config"] = {"effort": effort or DEFAULT_EFFORT}
+    return body
 
 
 class ExtractError(Exception):
@@ -90,11 +150,12 @@ def default_model(settings, provider=None):
     return None
 
 
-def chat(settings, prompt, system=SYSTEM, images=None, model=None):
+def chat(settings, prompt, system=SYSTEM, images=None, model=None, effort=None):
     """One completion against the configured provider.
 
     Returns (raw_text, error). model overrides the provider's default —
-    the second checker uses this to run a different (cheaper) model.
+    the second checker uses this to run a different (cheaper) model, and
+    effort lets it think harder than the extractor does.
     """
     provider = (settings.get("provider") or "none").strip().lower()
     if provider in ("", "none"):
@@ -109,7 +170,7 @@ def chat(settings, prompt, system=SYSTEM, images=None, model=None):
                 model, prompt, images=images, system=system)
         elif provider == "anthropic":
             raw = _anthropic(settings.get("anthropic_api_key") or "", model, prompt,
-                             images=images, system=system)
+                             images=images, system=system, effort=effort)
         elif provider == "llama":
             raw = _llama(
                 (settings.get("llama_base_url") or "http://127.0.0.1:11434").rstrip("/"),
@@ -216,14 +277,14 @@ def _openai_compat(base_url, api_key, model, prompt, images=None, system=SYSTEM)
         raise ExtractError("unexpected OpenAI-compatible response")
 
 
-def _anthropic(api_key, model, prompt, images=None, system=SYSTEM):
+def _anthropic(api_key, model, prompt, images=None, system=SYSTEM, effort=None):
     if not api_key:
         raise ExtractError("Anthropic API key is empty")
+    # Prompt caching is generally available; the old beta header is noise.
     headers = {
         "Content-Type": "application/json",
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "prompt-caching-2024-07-31",
     }
     content = []
     for img in images or []:
@@ -238,11 +299,18 @@ def _anthropic(api_key, model, prompt, images=None, system=SYSTEM):
     body = {
         "model": model,
         "max_tokens": 8192,
+        # The breakpoint is correct placement even though it does not fire
+        # today: this prompt is a few hundred tokens and the minimum cacheable
+        # prefix is larger. It costs nothing and starts paying if the prompt
+        # grows. The documents are per-jurisdiction and sit after it, so there
+        # is nothing else here worth caching.
         "system": [
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
         ],
         "messages": [{"role": "user", "content": content}],
     }
+    body.update(anthropic_tuning(model, effort=effort,
+                                 max_tokens=body["max_tokens"]))
     with httpx.Client(timeout=180.0) as client:
         r = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=body)
         if r.status_code >= 400:

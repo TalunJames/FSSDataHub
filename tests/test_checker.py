@@ -55,6 +55,24 @@ class DeterministicFlagTests(unittest.TestCase):
                           source_quote="the levy is 9000 mills")], doc)
         self.assertIn("implausible_rate", [f["code"] for f in flags])
 
+    def test_bulk_row_without_a_quote_is_not_flagged(self):
+        # A published rate file is a spreadsheet. There is nothing to quote,
+        # and demanding a quote of it queues every adapter row for a human.
+        flags = self.check.deterministic_flags(
+            [_finding_row(source_quote="", extraction_method="bulk_import")],
+            "whatever")
+        self.assertEqual(flags, [])
+
+    def test_hard_and_soft_flags_are_separated(self):
+        doc = "the county sales tax rate is 1.5%"
+        flags = self.check.deterministic_flags(
+            [_finding_row(confidence="low", rate_value=9000, rate_unit="mills",
+                          source_quote="the levy is 9000 mills")], doc)
+        self.assertEqual([f["code"] for f in self.check.hard_only(flags)],
+                         ["implausible_rate"])
+        self.assertEqual(sorted(f["code"] for f in self.check.soft_only(flags)),
+                         ["low_confidence", "quote_missing"])
+
     def test_low_confidence_flagged(self):
         doc = "the county sales tax rate is 1.5%"
         flags = self.check.deterministic_flags(
@@ -160,17 +178,56 @@ class RunAndApplyTests(DbTest):
         self.assertEqual(verdict, "off")
         self.assertEqual(self._status()["status"], "needs_review")
 
-    def test_deterministic_flag_skips_model_pass(self):
-        # Quote not present in the crawled text: flag even if the AI passes it.
+    def test_hard_flag_beats_model_pass_and_skips_the_call(self):
+        """A contradiction is not a judgement call.
+
+        A rate above its own recorded cap cannot be explained away, so it goes
+        to a human without spending a checker call on a second opinion."""
+        self.conn.execute(
+            "UPDATE tax_instrument SET cap_value=1.0, cap_unit='percent' "
+            "WHERE geoid=? AND category=?", (self.geoid, "sales_use"))
+        self.conn.commit()
+        with mock.patch("collector.extract.chat") as chat:
+            verdict, message = self.checkmod.run_and_apply(
+                self.conn, self._settings(), None, self.geoid, "sales_use",
+                self.doc_text)
+        chat.assert_not_called()
+        self.assertEqual(verdict, "flag")
+        self.assertEqual(self._status()["status"], "needs_review")
+        self.assertIn("above its own recorded cap", message)
+
+    def test_soft_flag_alone_is_cleared_by_the_model(self):
+        """The mechanical checks raise concerns; the model rules on them.
+
+        An exact quote miss is weak evidence — PDF extraction mangles
+        whitespace routinely — so a model that read the documents and was not
+        troubled files the row instead of queueing it for a human."""
         raw = json.dumps({"verdicts": [
             {"instrument_code": "municipal_general_sales", "verdict": "pass",
              "reason": ""}]})
+        with mock.patch("collector.extract.chat", return_value=(raw, None)) as chat:
+            verdict, message = self.checkmod.run_and_apply(
+                self.conn, self._settings(), None, self.geoid, "sales_use",
+                "totally unrelated page text")
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(self._status()["status"], "complete")
+        self.assertIn("judged immaterial", message)
+        # The concern was handed to the model rather than hidden from it.
+        self.assertIn("Automated concerns", chat.call_args[0][1])
+
+    def test_soft_flags_ride_along_when_the_model_also_flags(self):
+        raw = json.dumps({"verdicts": [
+            {"instrument_code": "municipal_general_sales", "verdict": "flag",
+             "reason": "this is the combined rate"}]})
         with mock.patch("collector.extract.chat", return_value=(raw, None)):
             verdict, _ = self.checkmod.run_and_apply(
                 self.conn, self._settings(), None, self.geoid, "sales_use",
                 "totally unrelated page text")
         self.assertEqual(verdict, "flag")
-        self.assertEqual(self._status()["status"], "needs_review")
+        codes = {f["code"] for f in json.loads(
+            self.conn.execute(
+                "SELECT flags FROM check_result").fetchone()["flags"])}
+        self.assertEqual(codes, {"ai_flag", "quote_missing"})
 
 
 class MigrationTests(DbTest):

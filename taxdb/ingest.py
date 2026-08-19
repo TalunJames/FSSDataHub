@@ -18,6 +18,8 @@ two-source rule has something to build on instead of an empty table.
 """
 
 import json
+import re
+from urllib.parse import urlparse
 
 from . import coverage, db, ledger
 from .vocab import (
@@ -191,6 +193,40 @@ def _context_errors(conn, key, row, index):
     return errs
 
 
+# Statute and code hosts. A rule read off the code itself is primary law.
+_CODE_HOST = re.compile(
+    r"legis|legislature|statute|codes?\.|municode|amlegal|generalcode|"
+    r"ecode360|library\.municode|law\.justia|casetext|lawserver", re.I)
+_CODE_PATH = re.compile(
+    r"/statute|/code|/ordinance|/charter|/constitution|/title\d|/chapter", re.I)
+
+
+def infer_tier(url, source_type=None):
+    """Authority tier from the URL when the researcher did not set one.
+
+    Defaulting every crawled page to tier 4 made 'weak source' the normal
+    state of the database and the signal meaningless. The crawler only keeps
+    government hosts in the first place, so a .gov page is the agency of
+    record until something says otherwise.
+    """
+    if source_type in ("statute", "ordinance"):
+        return 1
+    if source_type == "secondary":
+        return 3
+    u = (url or "").lower()
+    try:
+        host = urlparse(u).hostname or ""
+    except ValueError:
+        host = ""
+    if _CODE_HOST.search(host) or _CODE_PATH.search(u):
+        return 1
+    if host.endswith(".gov") or host.endswith(".us") or ".gov." in host:
+        return 2
+    if host.endswith(".org") or host.endswith(".edu"):
+        return 3
+    return 4
+
+
 class _Ctx:
     def __init__(self, conn, researcher, retrieved_at, method):
         self.conn = conn
@@ -205,7 +241,8 @@ class _Ctx:
         return db.get_or_create_source(
             self.conn, src["url"], src.get("name") or src["url"],
             source_type=src.get("source_type") or "portal",
-            authority_tier=src.get("authority_tier") or 4,
+            authority_tier=src.get("authority_tier") or infer_tier(
+                src["url"], src.get("source_type")),
             scope_geoid=scope_geoid,
         )
 
@@ -245,7 +282,14 @@ def _touch_work_item(conn, geoid, category):
         "INSERT OR IGNORE INTO work_item (geoid, category, priority, updated_at) "
         "VALUES (?,?,?,?)",
         (geoid, category, ledger.priority_for(j["kind"], j["population"]), db.now()))
-    ledger.set_status(conn, geoid, category, "needs_review")
+    # A row an adapter filled is filed, not queued — see ledger.BULK_NOTE.
+    if conn.execute(
+            "SELECT 1 FROM tax_instrument WHERE geoid=? AND category=? "
+            "AND superseded_by IS NULL AND extraction_method='bulk_import'",
+            (geoid, category)).fetchone():
+        ledger.set_status(conn, geoid, category, "complete", error=ledger.BULK_NOTE)
+    else:
+        ledger.set_status(conn, geoid, category, "needs_review")
 
 
 # ---------------------------------------------------------------- writers

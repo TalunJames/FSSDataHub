@@ -27,6 +27,15 @@ def apply_schema(conn):
 
 def _migrate(conn):
     """Rebuilds that CREATE IF NOT EXISTS cannot retrofit."""
+    # Batch results are banked before they are ingested, so the download can
+    # finish fast while applying stays metered. Cheap to retrofit.
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(extract_batch_item)")}
+        if cols and "raw_response" not in cols:
+            conn.execute("ALTER TABLE extract_batch_item ADD COLUMN raw_response TEXT")
+    except Exception:
+        pass
+
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='crawl_run'"
     ).fetchone()
@@ -155,6 +164,18 @@ def as_int(value, default=0):
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def worker_count(settings):
+    """How many work items are researched at once.
+
+    Both the pool and the global fetch ceiling read this. They used to carry
+    their own fallbacks, and a mismatch there would have run four workers at
+    the per-item rate meant for one, quietly quadrupling the load we put on
+    county web servers while the settings page still said otherwise.
+    """
+    return max(1, min(32, as_int(settings.get("workers"),
+                                 as_int(DEFAULTS["workers"], 4))))
 
 
 def as_float(value, default=0.0):

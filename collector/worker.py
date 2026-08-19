@@ -1,6 +1,20 @@
-"""Background loop: toggle, schedule, and burst crawls."""
+"""Background loop: toggle, schedule, and burst crawls.
+
+One coordinator thread decides what happens next — drain the intake queue,
+run an autopilot step, honour the schedule — and a pool of worker threads
+researches jurisdictions. Nearly all of a work item is spent waiting on a
+government web server and then on a model, so the pool is what turns a
+four-month national run into a three-week one. It does not increase the load
+on any single host: the fetch ceiling is global and divided among workers,
+and search has its own process-wide throttle.
+
+Every worker owns its own database connection, its own Crawlee storage
+directory, and its own slot in the status snapshot. The queue is safe to
+share because `ledger.claim` is atomic.
+"""
 
 import datetime
+import queue
 import threading
 import time
 import traceback
@@ -8,7 +22,7 @@ import traceback
 from taxdb import db, ingest, ledger, packets, seed as seedmod, sources, coverage
 from taxdb.vocab import ELECTIONS, FRAMEWORK, WORK_CATEGORIES
 
-from . import autopilot, check, crawl, extract, intake, store
+from . import autopilot, batch, check, crawl, extract, intake, store
 from .settings import VALID_CATEGORIES, VALID_KINDS
 
 _cancel = threading.Event()
@@ -27,16 +41,37 @@ _status = {
     "step": "",
     "warning": "",
 }
+# slot -> what that worker is on right now. The aggregate fields above stay
+# populated from whichever worker moved last, so the one-line home page and
+# the status API keep working unchanged.
+_slots = {}
 
 
 def snapshot():
     with _lock:
-        return dict(_status)
+        snap = dict(_status)
+        snap["workers"] = [dict(v, slot=k) for k, v in sorted(_slots.items())]
+        snap["active"] = len(_slots)
+        return snap
 
 
 def _set(**kwargs):
     with _lock:
         _status.update(kwargs)
+
+
+def _slot_set(slot, **kwargs):
+    """Record what one worker is doing, and mirror it into the summary."""
+    with _lock:
+        _slots.setdefault(slot, {}).update(kwargs)
+        for key in ("current_geoid", "current_name", "step"):
+            if key in kwargs:
+                _status[key] = kwargs[key]
+
+
+def _slot_clear(slot):
+    with _lock:
+        _slots.pop(slot, None)
 
 
 def start():
@@ -99,6 +134,7 @@ def request_burst(size):
 
 def _loop():
     last_stale_sweep = 0.0
+    last_batch_tick = 0.0
     while True:
         try:
             now = time.monotonic()
@@ -110,6 +146,9 @@ def _loop():
                     ledger.release_stale(conn, hours=2)
                 finally:
                     conn.close()
+            if now - last_batch_tick > 60:
+                last_batch_tick = now
+                _batch_tick()
             if _process_next_intake():
                 continue
             if _burst.is_set():
@@ -143,6 +182,35 @@ def _loop():
         except Exception:
             _set(state="error", message=traceback.format_exc()[-500:])
             time.sleep(5)
+
+
+def _batch_tick():
+    """Collect finished batch extractions and submit what has accumulated.
+
+    Runs on the coordinator, not a worker: it is one HTTP poll plus ingest, and
+    keeping it off the pool means a long collect cannot starve crawling.
+    """
+    conn = store.connect()
+    try:
+        s = store.get_all(conn)
+        if not batch.enabled(s):
+            return
+        out = batch.tick(conn, s)
+        if out["collected"] or out["failed"] or out["submitted"]:
+            bits = []
+            if out["submitted"]:
+                bits.append("sent %d for batch reading" % out["submitted"])
+            if out["collected"]:
+                bits.append("read back %d" % out["collected"])
+            if out["failed"]:
+                bits.append("%d came back unusable" % out["failed"])
+            if out["ready"]:
+                bits.append("%d still to ingest" % out["ready"])
+            _set(message="; ".join(bits))
+    except Exception as exc:
+        _set(message="batch extraction: %s" % str(exc)[:300])
+    finally:
+        conn.close()
 
 
 def _autopilot_step(settings):
@@ -282,7 +350,18 @@ def _parse_dt(value):
     return None
 
 
+def worker_count(settings):
+    """How many jurisdictions to research at once. See store.worker_count."""
+    return store.worker_count(settings)
+
+
 def _run_batch(mode, limit):
+    """Claim a batch and research it across the worker pool.
+
+    The pool shares one claimed batch through a queue rather than each worker
+    calling claim() itself: one claim per batch keeps the run table readable
+    and the ledger writes down to one burst instead of N.
+    """
     if _cancel.is_set() and mode != "burst":
         _cancel.clear()
         return True
@@ -292,7 +371,9 @@ def _run_batch(mode, limit):
         return False
     conn = store.connect()
     run_id = None
-    items = pages = findings = 0
+    tally = {"items": 0, "pages": 0, "findings": 0, "errors": 0}
+    tally_lock = threading.Lock()
+    stopped = False
     try:
         s = store.get_all(conn)
         run_id = store.start_run(conn, mode, provider=s.get("provider"),
@@ -304,38 +385,103 @@ def _run_batch(mode, limit):
                              items=0, pages=0, findings=0)
             _set(state="idle", message="queue empty — plan work first")
             return True
+
+        pending = queue.Queue()
+        for row in rows:
+            pending.put(row)
+        n_workers = min(worker_count(s), len(rows))
+
+        # One httpx client for the pool: it is thread-safe and pooling
+        # connections across workers is the point.
         client = crawl.client_for(s)
+
+        def run_slot(slot):
+            # Crawlee purges its storage on start, so each worker needs its own.
+            fetcher_mod = None
+            try:
+                from . import fetcher as fetcher_mod
+                fetcher_mod.set_slot(slot)
+            except Exception:
+                pass                      # legacy loop; no storage to isolate
+            wconn = store.connect()
+            try:
+                while not _cancel.is_set():
+                    try:
+                        row = pending.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        n_pages, n_find = _process(
+                            wconn, client, s, run_id, row, slot=slot)
+                        with tally_lock:
+                            tally["items"] += 1
+                            tally["pages"] += n_pages
+                            tally["findings"] += n_find
+                        store.bump_run(wconn, run_id, items=1, pages=n_pages,
+                                       findings=n_find)
+                    except Exception as exc:
+                        # One unresearchable jurisdiction must not take the
+                        # other nineteen down with it. Return it to the queue
+                        # with the reason; max_attempts stops a repeat offender.
+                        with tally_lock:
+                            tally["errors"] += 1
+                        _return_to_queue(wconn, row, exc)
+                    finally:
+                        _slot_clear(slot)
+            finally:
+                wconn.close()
+
+        threads = [threading.Thread(target=run_slot, args=(i,), daemon=True,
+                                    name="collector-w%d" % i)
+                   for i in range(n_workers)]
         try:
-            for row in rows:
-                if _cancel.is_set():
-                    store.finish_run(conn, run_id, "stopped", "stopped by operator",
-                                     items=items, pages=pages, findings=findings)
-                    _set(state="idle", message="stopped")
-                    _cancel.clear()
-                    return True
-                n_pages, n_find = _process(conn, client, s, run_id, row)
-                items += 1
-                pages += n_pages
-                findings += n_find
-                store.bump_run(conn, run_id, items=0, pages=n_pages, findings=n_find)
-                store.bump_run(conn, run_id, items=1)
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
         finally:
             client.close()
-        store.finish_run(conn, run_id, "ok", None, items=items, pages=pages,
-                         findings=findings)
+
+        stopped = _cancel.is_set()
+        if stopped:
+            store.finish_run(conn, run_id, "stopped", "stopped by operator",
+                             items=tally["items"], pages=tally["pages"],
+                             findings=tally["findings"])
+            _set(state="idle", message="stopped", step="",
+                 current_geoid=None, current_name=None)
+            _cancel.clear()
+            return True
+
+        note = None
+        if tally["errors"]:
+            note = "%d item(s) errored and went back in the queue" % tally["errors"]
+        store.finish_run(conn, run_id, "ok", note, items=tally["items"],
+                         pages=tally["pages"], findings=tally["findings"])
         _set(state="idle", current_geoid=None, current_name=None, step="",
-             message="finished %s: %d item(s), %d page(s), %d finding(s)"
-             % (mode, items, pages, findings))
+             message="finished %s: %d item(s), %d page(s), %d finding(s)%s"
+             % (mode, tally["items"], tally["pages"], tally["findings"],
+                "" if not note else " (%s)" % note))
         return True
     except Exception as exc:
         if run_id:
             store.finish_run(conn, run_id, "failed", str(exc)[:500],
-                             items=items, pages=pages, findings=findings)
+                             items=tally["items"], pages=tally["pages"],
+                             findings=tally["findings"])
         _set(state="error", message=str(exc)[:500])
         return True
     finally:
         conn.close()
         _job.release()
+
+
+def _return_to_queue(conn, row, exc):
+    """Hand a failed item back, with the reason recorded where it is visible."""
+    try:
+        ledger.set_status(conn, row["geoid"], row["category"], "pending",
+                          error=("worker error: %s" % exc)[:500])
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _claim(conn, s, limit):
@@ -354,13 +500,14 @@ def _claim(conn, s, limit):
     )
 
 
-def _process(conn, client, s, run_id, row):
+def _process(conn, client, s, run_id, row, slot=0):
     geoid, category = row["geoid"], row["category"]
     j = conn.execute("SELECT * FROM jurisdiction WHERE geoid=?", (geoid,)).fetchone()
     name = j["name"] if j else geoid
     state = j["state_usps"] if j else ""
-    _set(current_geoid=geoid, current_name="%s (%s) / %s" % (name, state, category),
-         step=_step_label(name, state, category))
+    _slot_set(slot, current_geoid=geoid,
+              current_name="%s (%s) / %s" % (name, state, category),
+              step=_step_label(name, state, category))
 
     diag = crawl.new_diag()
     pages, text = crawl.crawl_item(
@@ -387,6 +534,19 @@ def _process(conn, client, s, run_id, row):
 
     packet = packets.build(conn, geoid, [category])
     researcher = s.get("researcher") or "collector"
+
+    if batch.enabled(s):
+        # Pages are archived; the reading happens in a batch at half price.
+        # The item parks at awaiting_ai, which claim() will not take and the
+        # stale sweep will not touch, so it sits safely for hours.
+        batch.park(conn, run_id, geoid, category, packet, text, n_pages,
+                   search_note=search_note)
+        ledger.set_status(conn, geoid, category, "awaiting_ai",
+                          error="crawled; queued for batch extraction")
+        conn.commit()
+        _slot_set(slot, step="Queued %s for batch reading" % name)
+        return n_pages, 0
+
     raw, doc, err = extract.extract(s, packet, text, researcher=researcher)
     conn.execute(
         "INSERT INTO crawl_extract (run_id, geoid, category, provider, model, "
