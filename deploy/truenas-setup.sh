@@ -29,10 +29,15 @@ mkdir -p "${DATA_DIR}/archive" "${DATA_DIR}/cache" "${DATA_DIR}/out" "${DATA_DIR
 echo "Building ${IMAGE} on this NAS (do not build on a Mac — architecture will not match)…"
 docker build -t "${IMAGE}" "${APP_DIR}"
 
+# The template points at the GHCR image with pull_policy: always; this script
+# just built a local image, so swap it in and drop the forced pull, or compose
+# would run (or fail to fetch) the remote image instead of the build above.
 COMPOSE="${APP_DIR}/.compose.truenas.generated.yml"
 sed -e "s|/mnt/Seawolf/FogSignal/taxdata/sql|${DATA_DIR}|g" \
     -e "s|\"3490:8080\"|\"${HOST_PORT}:8080\"|g" \
     -e "s|port: 3490|port: ${HOST_PORT}|g" \
+    -e "s|image: ghcr.io/talunjames/fssdatahub:latest|image: ${IMAGE}|" \
+    -e "/pull_policy: always/d" \
     "${APP_DIR}/compose.truenas.yml" > "${COMPOSE}"
 
 echo "Starting collector with data on ${DATA_DIR}…"

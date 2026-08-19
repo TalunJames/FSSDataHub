@@ -47,6 +47,41 @@ def enabled(settings):
             and (settings.get("provider") or "none").strip().lower() in SUPPORTED)
 
 
+def pending_work(conn):
+    """True while anything is parked anywhere in the batch pipeline.
+
+    The tick must keep running on this even after batch mode is switched off:
+    in-flight batches still need polling and collecting, ready results still
+    need applying, and queued items need handing back — or every one of them
+    sits at awaiting_ai forever, invisible to claim() and the stale sweep."""
+    row = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM extract_batch "
+        "        WHERE status IN ('unconfirmed','submitted','ended')) + "
+        "       (SELECT COUNT(*) FROM extract_batch_item "
+        "        WHERE status IN ('queued','ready'))").fetchone()
+    return bool(row[0])
+
+
+def requeue_queued(conn):
+    """Hand parked-but-unsubmitted items back to the synchronous path.
+
+    Batch mode was turned off (or the provider switched away) with items
+    already crawled and queued. They re-crawl, which costs pages, but the
+    alternative was costing them entirely."""
+    rows = conn.execute("SELECT id, geoid, category FROM extract_batch_item "
+                        "WHERE status='queued'").fetchall()
+    for r in rows:
+        conn.execute(
+            "UPDATE extract_batch_item SET status='failed', "
+            "error='batch mode turned off before submission' WHERE id=?",
+            (r["id"],))
+        ledger.set_status(conn, r["geoid"], r["category"], "pending",
+                          error="batch mode turned off; queued for live reading")
+    if rows:
+        conn.commit()
+    return len(rows)
+
+
 def _headers(settings):
     key = (settings.get("anthropic_api_key") or "").strip()
     if not key:
@@ -206,12 +241,25 @@ def reconcile_unconfirmed(conn, settings):
     ).fetchall()
     if not rows:
         return 0
+    # Paginate: with only the first page, a busy account could hide the lost
+    # batch behind newer ones, and the age-out below would requeue items the
+    # provider is actually processing — the double submission this function
+    # exists to prevent. listed_all records whether the walk reached the end.
+    remote = []
+    listed_all = False
     try:
+        params = {"limit": 100}
         with httpx.Client(timeout=60.0) as client:
-            r = client.get(API, params={"limit": 20}, headers=_headers(settings))
-        if r.status_code >= 400:
-            return 0
-        remote = (r.json() or {}).get("data") or []
+            for _ in range(5):
+                r = client.get(API, params=params, headers=_headers(settings))
+                if r.status_code >= 400:
+                    return 0
+                page = r.json() or {}
+                remote.extend(page.get("data") or [])
+                if not page.get("has_more"):
+                    listed_all = True
+                    break
+                params["after_id"] = page.get("last_id")
     except Exception:
         return 0
 
@@ -238,7 +286,7 @@ def reconcile_unconfirmed(conn, settings):
         aged = conn.execute(
             "SELECT 1 FROM extract_batch WHERE id=? AND "
             "created_at < datetime('now', '-2 hours')", (row["id"],)).fetchone()
-        if not matches and aged:
+        if not matches and aged and listed_all:
             conn.execute(
                 "UPDATE extract_batch SET status='failed', "
                 "message='submit never reached the provider; items requeued' "
@@ -376,11 +424,18 @@ def apply_ready(conn, settings, limit=25, apply_result=None):
         try:
             ok = apply_result(conn, settings, item, item["raw_response"],
                               item["error"])
-        except Exception as exc:
-            # Do not let one poisonous result loop forever on every tick.
+        except (Exception, SystemExit) as exc:
+            # Do not let one poisonous result loop forever on every tick —
+            # and hand the work item to a human, or it sits at awaiting_ai
+            # forever with its batch item marked failed.
+            conn.rollback()
             conn.execute(
                 "UPDATE extract_batch_item SET status='failed', error=? WHERE id=?",
                 (("apply failed: %s" % exc)[:500], item["id"]))
+            ledger.set_status(conn, item["geoid"], item["category"],
+                              "needs_review",
+                              error=("batch result could not be applied: %s"
+                                     % exc)[:500])
             conn.commit()
             ok = False
         done += 1 if ok else 0
@@ -479,7 +534,7 @@ def apply_one(conn, settings, item, raw, err):
             asserted_by="collector")
 
     check.run_and_apply(conn, settings, item["run_id"], geoid, category,
-                        item["doc_text"])
+                        item["doc_text"], claim_ids=res.get("claim_ids"))
     if item["search_note"]:
         conn.execute(
             "UPDATE work_item SET last_error=COALESCE(last_error || ' | ', '') || ? "
@@ -527,7 +582,13 @@ def tick(conn, settings):
     out["failed"] = applied["failed"]
     out["ready"] = ready_depth(conn)
 
+    # Only submission is gated on the setting. Everything above — polling,
+    # collecting, applying — must run regardless, or turning batch mode off
+    # mid-flight strands every parked item at awaiting_ai.
     depth = queue_depth(conn)
+    if not enabled(settings):
+        out["requeued"] = requeue_queued(conn) if depth else 0
+        return out
     floor = store.as_int(settings.get("batch_min_items"), 25)
     if depth and (depth >= floor or not out["waiting"]):
         _, n = submit(conn, settings)

@@ -36,6 +36,10 @@ services:
     environment:
       TAX_DATABASE_DATA: /data
       TZ: America/Los_Angeles
+    # Lets the container reach Ollama on the NAS itself at
+    # host.docker.internal:11434 (the default second-checker endpoint).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /mnt/Seawolf/FogSignal/taxdata/sql:/data
     labels:

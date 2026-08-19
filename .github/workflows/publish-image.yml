@@ -6,7 +6,20 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest tests/ -q
+
   docker:
+    # The NAS pulls :latest with pull_policy always, so an image only ships
+    # after the suite passes; the sha tag is the rollback handle.
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,6 +38,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/talunjames/fssdatahub:latest
+            ghcr.io/talunjames/fssdatahub:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/TalunJames/FSSDataHub
             org.opencontainers.image.title=FSSDataHub

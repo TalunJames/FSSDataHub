@@ -305,7 +305,8 @@ class ScheduleTests(unittest.TestCase):
         self.assertTrue(self.worker._schedule_due(s))
 
     def test_hourly_not_due_immediately(self):
-        now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S")
         s = {"schedule_enabled": "1", "schedule_kind": "hourly", "last_scheduled_at": now}
         self.assertFalse(self.worker._schedule_due(s))
 

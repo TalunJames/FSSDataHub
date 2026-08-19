@@ -44,6 +44,7 @@
                value="{{ settings.anthropic_api_key }}" autocomplete="off">
       </div>
       <button type="button" class="btn btn-secondary" data-action="test-provider">Test it</button>
+      {% if settings.anthropic_api_key_set %}<button type="button" class="btn btn-secondary" data-clear-key="anthropic_api_key">Remove</button>{% endif %}
     </div>
     <div class="keyrow" data-provider-block="openai">
       <div class="field">
@@ -52,6 +53,7 @@
                value="{{ settings.openai_api_key }}" autocomplete="off">
       </div>
       <button type="button" class="btn btn-secondary" data-action="test-provider">Test it</button>
+      {% if settings.openai_api_key_set %}<button type="button" class="btn btn-secondary" data-clear-key="openai_api_key">Remove</button>{% endif %}
     </div>
     <div class="keyrow" data-provider-block="llama">
       <div class="field">
@@ -152,6 +154,7 @@
             </label>
             <label>API key <span class="dim">optional</span>
               <input name="llama_api_key" type="password" value="{{ settings.llama_api_key }}" autocomplete="off"></label>
+            {% if settings.llama_api_key_set %}<button type="button" class="btn btn-secondary" data-clear-key="llama_api_key">Remove key</button>{% endif %}
             <p class="hint">On TrueNAS, use the Ollama app's IP or <code>host.docker.internal:11434</code> if Ollama runs on the host. The name must match <code>ollama list</code> exactly, and the model must be pulled before pointing at it; <code>qwen3-fast</code> is the checker default.</p>
           </fieldset>
           <fieldset>
@@ -222,6 +225,7 @@
           </label>
           <label>Search API key <span class="dim">Brave Search</span>
             <input name="search_api_key" type="password" value="{{ settings.search_api_key }}" autocomplete="off"></label>
+          {% if settings.search_api_key_set %}<button type="button" class="btn btn-secondary" data-clear-key="search_api_key">Remove key</button>{% endif %}
           <label>Search queries per minute <span class="dim"><code>auto</code>, or 0 for no limit</span>
             <input name="search_qpm" value="{{ settings.search_qpm }}"></label>
         </div>

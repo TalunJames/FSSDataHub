@@ -478,9 +478,9 @@ def record(conn, q="", filt="all", page=1, per_page=PER_PAGE):
     if statuses:
         where.append("w.status IN (%s)" % ",".join("?" * len(statuses)))
         params += list(statuses)
-    total = _count(conn, "SELECT COUNT(*) FROM work_item w "
-                         "JOIN jurisdiction j ON j.geoid=w.geoid "
-                         "WHERE " + " AND ".join(where), params)
+    # The chips pass already counted every status under this search, so the
+    # active chip's figure is the filtered total — no second full scan.
+    total = next((c["count"] for c in chips if c["on"]), counts["all"])
     page = max(1, int(page or 1))
     offset = (page - 1) * per_page
     rows = _rows(
@@ -492,15 +492,26 @@ def record(conn, q="", filt="all", page=1, per_page=PER_PAGE):
         " ORDER BY j.population DESC, j.name, w.category LIMIT ? OFFSET ?",
         params + [per_page, offset])
 
+    # One query for the whole page's "rate on file" column instead of one per
+    # row. ORDER BY id with first-wins keeps the same row the per-row LIMIT 1
+    # picked.
+    rates = {}
+    if rows:
+        pairs = [(r["geoid"], r["category"]) for r in rows]
+        for t in _rows(
+                conn,
+                "SELECT geoid, category, rate_value, rate_unit FROM tax_instrument "
+                "WHERE superseded_by IS NULL AND rate_value IS NOT NULL AND (%s) "
+                "ORDER BY id" % " OR ".join(
+                    "(geoid=? AND category=?)" for _ in pairs),
+                [x for p in pairs for x in p]):
+            rates.setdefault((t["geoid"], t["category"]), t)
+
     places = []
     for r in rows:
         label, tone, tip = STANDING.get(
             r["status"], (r["status"], "busy", "Current work-list status."))
-        top = _one(
-            conn, "SELECT rate_value, rate_unit FROM tax_instrument "
-                  "WHERE geoid=? AND category=? AND superseded_by IS NULL "
-                  "AND rate_value IS NOT NULL ORDER BY id LIMIT 1",
-            (r["geoid"], r["category"]))
+        top = rates.get((r["geoid"], r["category"]))
         places.append({
             "geoid": r["geoid"],
             "category": r["category"],

@@ -213,7 +213,13 @@ def parse_rate_rows(text):
 
 
 def geoid_for(jtype, state_fips, jfips):
-    """Census GEOID, or None if this jurisdiction type has no Census key."""
+    """Census GEOID, or None if this jurisdiction type has no Census key.
+
+    Townships (type 05) return None on purpose: an MCD GEOID is
+    state+county+subdivision, and the SST row does not carry the county, so
+    the mapping cannot be built from this file. Those rows land in the
+    unmapped report with that explanation rather than pretending support.
+    """
     jtype = (jtype or "").zfill(2)
     state_fips = (state_fips or "").zfill(2)
     digits = re.sub(r"\D", "", jfips or "")
@@ -265,8 +271,11 @@ def rows_to_findings(conn, text, meta, archive_id=None, source_url=None, today=N
         geoid = geoid_for(jtype, row["state_fips"], row["jfips"])
         spec = INSTRUMENT[jtype]
         if not geoid:
-            unmapped.append(("%s/%s/%s" % (row["state_fips"], jtype, row["jfips"]),
-                             "no GEOID mapping for type %s" % jtype))
+            reason = ("township rate — SST rows carry no county code, so the "
+                      "MCD GEOID cannot be built" if jtype in TOWNSHIP_TYPES
+                      else "no GEOID mapping for type %s" % jtype)
+            unmapped.append(("%s/%s/%s" % (row["state_fips"], jtype,
+                                           row["jfips"]), reason))
             continue
         live = conn.execute(
             "SELECT geoid, kind FROM jurisdiction WHERE geoid=?", (geoid,)

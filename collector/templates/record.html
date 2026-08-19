@@ -7,7 +7,7 @@
 
 <div class="chips">
   {% for c in view.chips %}
-  <a href="/record?filter={{ c.key }}{% if q %}&amp;q={{ q }}{% endif %}" class="{{ 'on' if c.on else '' }}">
+  <a href="/record?filter={{ c.key }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}" class="{{ 'on' if c.on else '' }}">
     {{ c.label }} <span class="n">{{ "{:,}".format(c.count) }}</span>
   </a>
   {% endfor %}
@@ -57,10 +57,10 @@
   </p>
   <div class="btns">
     <a class="btn btn-secondary {{ 'disabled' if view.page <= 1 else '' }}"
-       href="/record?filter={{ filter_key }}&amp;page={{ view.page - 1 }}{% if q %}&amp;q={{ q }}{% endif %}"
+       href="/record?filter={{ filter_key }}&amp;page={{ view.page - 1 }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}"
        {% if view.page <= 1 %}aria-disabled="true" style="opacity:.45;pointer-events:none"{% endif %}>Previous</a>
     <a class="btn btn-secondary"
-       href="/record?filter={{ filter_key }}&amp;page={{ view.page + 1 }}{% if q %}&amp;q={{ q }}{% endif %}"
+       href="/record?filter={{ filter_key }}&amp;page={{ view.page + 1 }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}"
        {% if view.page >= view.pages %}aria-disabled="true" style="opacity:.45;pointer-events:none"{% endif %}>Next</a>
   </div>
 </div>

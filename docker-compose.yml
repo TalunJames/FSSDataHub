@@ -10,6 +10,10 @@ services:
       dockerfile: Dockerfile
     container_name: taxdb-collector
     restart: unless-stopped
+    # Loads .env (copy .env.example) if present; nothing else reads that file.
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "3490:8080"
     environment:
@@ -29,7 +33,7 @@ services:
       # TrueNAS: /mnt/<pool>/<dataset>
       - taxdb-data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('COLLECTOR_PORT', '8080'))"]
       interval: 30s
       timeout: 5s
       retries: 3

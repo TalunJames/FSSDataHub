@@ -116,7 +116,7 @@ def _process_next_intake():
         _set(state="idle", message="intake #%s wrote %d finding(s)" % (row["id"], n),
              current_geoid=None, current_name=None)
         return True
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         _set(state="error", message=str(exc)[:500])
         return True
     finally:
@@ -179,7 +179,9 @@ def _loop():
             _set(state="idle", mode=None, run_id=None, current_geoid=None,
                  current_name=None, step="")
             time.sleep(1.5)
-        except Exception:
+        except (Exception, SystemExit):
+            # SystemExit included: taxdb raises it for data errors, and an
+            # escape here would silently kill the coordinator until restart.
             _set(state="error", message=traceback.format_exc()[-500:])
             time.sleep(5)
 
@@ -193,10 +195,14 @@ def _batch_tick():
     conn = store.connect()
     try:
         s = store.get_all(conn)
-        if not batch.enabled(s):
+        # Disabled AND nothing parked: nothing to do. Disabled with parked
+        # work still ticks, so in-flight batches land and queued items are
+        # handed back instead of stranding at awaiting_ai.
+        if not batch.enabled(s) and not batch.pending_work(conn):
             return
         out = batch.tick(conn, s)
-        if out["collected"] or out["failed"] or out["submitted"]:
+        if out["collected"] or out["failed"] or out["submitted"] \
+                or out.get("requeued"):
             bits = []
             if out["submitted"]:
                 bits.append("sent %d for batch reading" % out["submitted"])
@@ -206,6 +212,9 @@ def _batch_tick():
                 bits.append("%d came back unusable" % out["failed"])
             if out["ready"]:
                 bits.append("%d still to ingest" % out["ready"])
+            if out.get("requeued"):
+                bits.append("%d handed back after batch mode was turned off"
+                            % out["requeued"])
             _set(message="; ".join(bits))
     except Exception as exc:
         _set(message="batch extraction: %s" % str(exc)[:300])
@@ -229,7 +238,7 @@ def _autopilot_step(settings):
     try:
         run_action(action, kwargs, settings)
         return True
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         # A failed bulk download must not spin the loop. The cooldown marker
         # was written before the attempt, so the next tick moves on.
         _set(state="idle", step="", message="%s failed: %s" % (label, str(exc)[:300]))
@@ -294,7 +303,7 @@ def run_action(action, kwargs, settings=None):
 def _schedule_due(s):
     if not store.as_bool(s.get("schedule_enabled")):
         return False
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     last = (s.get("last_scheduled_at") or "").strip()
     kind = (s.get("schedule_kind") or "daily").strip()
     last_dt = _parse_dt(last)
@@ -419,10 +428,13 @@ def _run_batch(mode, limit):
                             tally["findings"] += n_find
                         store.bump_run(wconn, run_id, items=1, pages=n_pages,
                                        findings=n_find)
-                    except Exception as exc:
+                    except (Exception, SystemExit) as exc:
                         # One unresearchable jurisdiction must not take the
                         # other nineteen down with it. Return it to the queue
                         # with the reason; max_attempts stops a repeat offender.
+                        # SystemExit is included: taxdb raises it for data
+                        # errors (it is also a CLI), and it would otherwise
+                        # kill this thread silently.
                         with tally_lock:
                             tally["errors"] += 1
                         _return_to_queue(wconn, row, exc)
@@ -559,6 +571,16 @@ def _process(conn, client, s, run_id, row, slot=0):
 
     if err or not doc:
         park("pending", (err or "extract failed"))
+        if err and err.startswith(extract.PROVIDER_DOWN):
+            # A provider outage says nothing about this jurisdiction. Give the
+            # attempt back so an hour of 529s cannot walk the queue's best
+            # items into 'blocked', and let the pool breathe before the next
+            # claim hits the same wall.
+            conn.execute(
+                "UPDATE work_item SET attempts=MAX(attempts-1,0) "
+                "WHERE geoid=? AND category=?", (geoid, category))
+            conn.commit()
+            time.sleep(30)
         return n_pages, 0
 
     ingest.stamp_doc(doc, geoid=geoid, category=category, state_usps=state,
@@ -602,7 +624,8 @@ def _process(conn, client, s, run_id, row, slot=0):
 
     # Second checker: items that pass are marked complete with no human
     # review; anything flagged stays at needs_review with the reasons.
-    check.run_and_apply(conn, s, run_id, geoid, category, text)
+    check.run_and_apply(conn, s, run_id, geoid, category, text,
+                        claim_ids=res.get("claim_ids"))
     if search_note:
         conn.execute(
             "UPDATE work_item SET last_error=COALESCE(last_error || ' | ', '') || ? "

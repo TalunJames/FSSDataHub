@@ -152,6 +152,17 @@ VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
 # Shown on the welcome screen after an update. Plain words, newest release
 # only — this is read by the owner, not a developer.
 WHATS_NEW = (
+    ("A large round of fixes under the hood",
+     "The crawler stops wandering into careers pages and staff directories, "
+     "re-archives documents whose contents changed, and reads old county "
+     "pages' special characters correctly. The double-checker now judges "
+     "only what each run actually found (so it is much faster on the local "
+     "model) and refuses to wave anything through on a garbled answer. "
+     "Items can no longer get stuck invisibly when batch reading is turned "
+     "off, and a provider outage no longer walks good items into 'blocked'. "
+     "Two election measures without ballot numbers stay two records, and "
+     "revoked state authority no longer shows as live. Stored API keys can "
+     "now be removed from Settings with the new Remove button."),
     ("The double-check moved to your local model",
      "The second AI pass that verifies each extraction now runs on the "
      "NAS's own model (Ollama) by default, so double-checking is free. "

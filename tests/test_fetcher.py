@@ -162,6 +162,26 @@ class _FakePlaywrightCrawler(_FakeCrawler):
                 _PwContext(req, _Page(req.url, html), _PwResponse(200)))
 
 
+class _FakeRequestQueue:
+    """Mirrors the real contract fetcher relies on: open(alias=...,
+    configuration=...) returns a queue, drop() deletes it. Aliases are
+    recorded so a test can assert each round got its own queue."""
+
+    opened = []
+    dropped = []
+
+    def __init__(self, alias):
+        self.alias = alias
+
+    @classmethod
+    async def open(cls, alias=None, configuration=None, **kwargs):
+        cls.opened.append(alias)
+        return cls(alias)
+
+    async def drop(self):
+        type(self).dropped.append(self.alias)
+
+
 def _install_fake_crawlee():
     """Put a minimal fake `crawlee` in sys.modules; return an undo callable."""
     saved = {k: v for k, v in sys.modules.items() if k.split(".")[0] == "crawlee"}
@@ -180,9 +200,13 @@ def _install_fake_crawlee():
     clients = types.ModuleType("crawlee.http_clients")
     clients.HttpxHttpClient = lambda **kw: kw
 
+    storages = types.ModuleType("crawlee.storages")
+    storages.RequestQueue = _FakeRequestQueue
+
     for name, mod in (("crawlee", root), ("crawlee.configuration", config),
                       ("crawlee.crawlers", crawlers),
-                      ("crawlee.http_clients", clients)):
+                      ("crawlee.http_clients", clients),
+                      ("crawlee.storages", storages)):
         sys.modules[name] = mod
 
     def undo():
@@ -533,6 +557,34 @@ class FetcherTests(DbTest):
         pages, _ = self.crawl_item(self.settings(web_search="1"))
         urls = [p["url"] for p in pages]
         self.assertIn("https://co.franklin.oh.us/lodging.pdf", urls)
+
+    def test_each_round_gets_its_own_request_queue(self):
+        """Crawlee caches storage instances process-wide; a shared default
+        queue crashed item 2 on item 1's closed event loop and bled leftover
+        requests between rounds. Every round must open a fresh alias and
+        drop it when done."""
+        _FakeRequestQueue.opened = []
+        _FakeRequestQueue.dropped = []
+        _FakeCrawler.pages = {
+            "https://franklincountyohio.gov/": (200, "text/html",
+                                                b"<html><body>Hello</body></html>"),
+            "https://co.franklin.oh.us/lodging.pdf": (200, "application/pdf",
+                                                      MINIMAL_PDF),
+        }
+        self.seed()
+
+        def fake_search(client, name, state, category, kind=None, limit=12,
+                        settings=None, diag=None):
+            return ["https://co.franklin.oh.us/lodging.pdf"]
+
+        self.crawl.search_web = fake_search
+        self.crawl_item(self.settings(web_search="1"))
+        self.assertEqual(len(_FakeRequestQueue.opened),
+                         len(set(_FakeRequestQueue.opened)),
+                         "rounds shared a request queue alias")
+        self.assertEqual(sorted(_FakeRequestQueue.opened),
+                         sorted(_FakeRequestQueue.dropped),
+                         "an opened queue was never dropped")
 
 
 class BothEnginesReportSearchTests(DbTest):

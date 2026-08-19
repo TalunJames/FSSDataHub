@@ -129,10 +129,15 @@ def next_action(conn, settings):
             "Adding the next %d places to the work list" % len(rows)
 
     days = store.as_int(settings.get("refresh_days"), 365)
+    # Same bulk-covered exclusion as ledger.requeue_stale, or this count never
+    # reaches zero for items claim() would only park again — a livelock.
     if days > 0 and _count(
             conn,
             "SELECT COUNT(*) FROM work_item WHERE status IN ('complete','no_data') "
-            "AND completed_at IS NOT NULL AND completed_at < datetime('now', ?)",
+            "AND completed_at IS NOT NULL AND completed_at < datetime('now', ?) "
+            "AND NOT EXISTS (SELECT 1 FROM tax_instrument t "
+            "  WHERE t.geoid=work_item.geoid AND t.category=work_item.category "
+            "  AND t.superseded_by IS NULL AND t.extraction_method='bulk_import')",
             ("-%d days" % days,)):
         return REFRESH, {"days": days}, \
             "Re-checking records last researched over %d days ago" % days

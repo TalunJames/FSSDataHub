@@ -121,14 +121,23 @@ Include one verdict per row you were given.
 """
 
 
-def live_rows(conn, geoid, category):
+def _id_filter(ids, column="id"):
+    """SQL fragment restricting to specific row ids, or nothing at all."""
+    if not ids:
+        return "", []
+    ids = sorted(ids)
+    return (" AND %s IN (%s)" % (column, ",".join("?" * len(ids))), ids)
+
+
+def live_rows(conn, geoid, category, ids=None):
+    where, params = _id_filter(ids, "t.id")
     return conn.execute(
         "SELECT t.id, t.instrument_code, t.label, t.status, t.rate_value, "
         "t.rate_unit, t.cap_value, t.cap_unit, t.confidence, t.source_quote, "
         "t.notes, t.effective_date, t.extraction_method, s.url "
         "FROM tax_instrument t LEFT JOIN source s ON s.id=t.source_id "
-        "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL",
-        (geoid, category)).fetchall()
+        "WHERE t.geoid=? AND t.category=? AND t.superseded_by IS NULL" + where,
+        [geoid, category] + params).fetchall()
 
 
 def _norm(text):
@@ -199,7 +208,8 @@ def deterministic_flags(rows, doc_text):
     return flags
 
 
-def live_measures(conn, geoid, limit=40):
+def live_measures(conn, geoid, limit=40, ids=None):
+    where, params = _id_filter(ids, "b.id")
     return conn.execute(
         "SELECT b.id, b.measure_id_local, b.election_date, b.election_type, "
         "b.measure_class, b.category, b.instrument_code, b.outcome, b.rate_value, "
@@ -207,24 +217,29 @@ def live_measures(conn, geoid, limit=40):
         "b.pct_yes, b.threshold_required, b.threshold_basis, b.margin_vs_threshold, "
         "b.stated_purpose, b.confidence, b.notes, s.url, s.authority_tier "
         "FROM ballot_measure b LEFT JOIN source s ON s.id=b.source_id "
-        "WHERE b.geoid=? AND b.superseded_by IS NULL "
-        "ORDER BY b.election_date DESC LIMIT ?", (geoid, limit)).fetchall()
+        "WHERE b.geoid=? AND b.superseded_by IS NULL" + where +
+        " ORDER BY b.election_date DESC LIMIT ?",
+        [geoid] + params + [limit]).fetchall()
 
 
-def live_framework(conn, usps, limit=80):
+def live_framework(conn, usps, limit=80, thr_ids=None, ag_ids=None):
     """Thresholds and grants for one state, as one checkable list."""
+    thr_where, thr_params = _id_filter(thr_ids, "t.id")
+    ag_where, ag_params = _id_filter(ag_ids, "g.id")
     thr = conn.execute(
         "SELECT t.id, t.measure_class AS label, t.jurisdiction_kind, "
         "t.purpose_restriction, t.threshold_value, t.threshold_basis, "
         "t.statute_cite, t.confidence, t.notes, s.url, s.authority_tier "
         "FROM threshold_rule t LEFT JOIN source s ON s.id=t.source_id "
-        "WHERE t.state_usps=? ORDER BY t.id DESC LIMIT ?", (usps, limit)).fetchall()
+        "WHERE t.state_usps=?" + thr_where + " ORDER BY t.id DESC LIMIT ?",
+        [usps] + thr_params + [limit]).fetchall()
     ag = conn.execute(
         "SELECT g.id, g.instrument_code AS label, g.jurisdiction_kind, g.category, "
         "g.permitted, g.max_rate, g.max_rate_unit, g.statute_cite, g.confidence, "
         "g.notes, s.url, s.authority_tier "
         "FROM authority_grant g LEFT JOIN source s ON s.id=g.source_id "
-        "WHERE g.state_usps=? ORDER BY g.id DESC LIMIT ?", (usps, limit)).fetchall()
+        "WHERE g.state_usps=?" + ag_where + " ORDER BY g.id DESC LIMIT ?",
+        [usps] + ag_params + [limit]).fetchall()
     return list(thr) + list(ag)
 
 
@@ -320,6 +335,56 @@ think the recorded value is actually wrong or unsupportable.
 """
 
 
+# Documents longer than this are excerpted around each finding's anchor text
+# (source_quote, measure id, statute cite) instead of sent whole. The verdicts
+# are judged against those anchors, so the text around them is what the
+# checker actually needs — on the local model, prompt evaluation of an 80k-char
+# document is the dominant per-item latency.
+EXCERPT_OVER = 15000
+
+_ANCHOR_FIELDS = ("source_quote", "measure_id_local", "statute_cite")
+
+
+def excerpt_doc(doc_text, rows, max_chars, pad=2000, head=3000):
+    """Anchor-centered windows of doc_text, merged and capped at max_chars.
+
+    Falls back to the plain head of the document when no anchor can be
+    located, which is exactly the pre-excerpt behavior.
+    """
+    if not doc_text or len(doc_text) <= min(EXCERPT_OVER, max_chars):
+        return (doc_text or "")[:max_chars]
+    spans = [(0, min(head, len(doc_text)))]
+    found = False
+    for r in rows:
+        for field in _ANCHOR_FIELDS:
+            anchor = str(_field(r, field) or "").strip()
+            if len(anchor) < 3:
+                continue
+            pos = doc_text.find(anchor[:80])
+            if pos < 0:
+                continue
+            found = True
+            spans.append((max(0, pos - pad),
+                          min(len(doc_text), pos + len(anchor) + pad)))
+    if not found:
+        return doc_text[:max_chars]
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts, total = [], 0
+    for start, end in merged:
+        chunk = doc_text[start:end][:max(0, max_chars - total)]
+        if not chunk:
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "\n\n[... document trimmed to the passages around each finding ...]\n\n".join(parts)
+
+
 def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
              system=None, concerns=None):
     """Returns (flags, error). error is set when the checker call failed."""
@@ -343,7 +408,8 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
         % (jurisdiction, category,
            json.dumps(findings, indent=1),
            concern_block,
-           (doc_text or "_none — rely on the quotes and common sense_")[:max_chars]))
+           excerpt_doc(doc_text, rows, max_chars)
+           or "_none — rely on the quotes and common sense_"))
     model = (settings.get("checker_model") or "").strip() or None
     # The checker thinks harder than the extractor on purpose: its whole job
     # is to be skeptical, and a checker that rubber-stamps is worse than none.
@@ -357,13 +423,27 @@ def ai_flags(settings, jurisdiction, category, rows, doc_text, images=None,
         doc = extract.parse_json_payload(raw)
     except extract.ExtractError as exc:
         return [], "checker returned unparseable output: %s" % exc
+    # A parseable answer in the wrong shape is still not a verdict. Anything
+    # short of one explicit verdict per finding is an error, and any verdict
+    # that is not exactly "pass" is a flag — the failure direction here must
+    # be review, never trust.
+    verdicts = doc.get("verdicts") if isinstance(doc, dict) else \
+        (doc if isinstance(doc, list) else None)
+    if not isinstance(verdicts, list) or not all(
+            isinstance(v, dict) for v in verdicts):
+        return [], "checker returned no usable verdicts array"
+    if len(verdicts) < len(rows):
+        return [], ("checker returned %d verdict(s) for %d finding(s) — "
+                    "not one per finding as asked" % (len(verdicts), len(rows)))
     out = []
-    for v in doc.get("verdicts") or []:
-        if (v.get("verdict") or "").strip().lower() == "flag":
+    for v in verdicts:
+        word = str(v.get("verdict") or "").strip().lower()
+        if word != "pass":
             out.append({
                 "code": "ai_flag",
                 "instrument_code": v.get("instrument_code"),
-                "reason": (v.get("reason") or "checker flagged")[:300],
+                "reason": (v.get("reason")
+                           or "checker verdict %r" % (word or "missing"))[:300],
             })
     return out, None
 
@@ -404,27 +484,39 @@ def summarize(flags, limit=3):
     return lead + " — " + "; ".join(parts)
 
 
-def subject(conn, geoid, category):
+def subject(conn, geoid, category, claim_ids=None):
     """What to check for this work item, and how to describe it to the model.
 
     Returns (rows, flag_fn, system_prompt, noun). The three passes check
     different tables, so the checker has to know which one it is looking at.
+
+    claim_ids, when given, is load_doc's {"table": set(ids)} for the ingest
+    being checked: only the rows this document wrote are judged, not the
+    whole accumulated table. Re-verdicting years of already-verified measures
+    on every county refresh paid for itself exactly never — and let one old
+    hard-flagged row block auto-complete for every future run of that county.
     """
+    def _ids(table):
+        if claim_ids is None:
+            return None
+        return claim_ids.get(table) or None
+
     if category == ELECTIONS:
-        return (live_measures(conn, geoid), measure_flags, MEASURE_SYSTEM,
-                "measure")
+        return (live_measures(conn, geoid, ids=_ids("ballot_measure")),
+                measure_flags, MEASURE_SYSTEM, "measure")
     if category == FRAMEWORK:
         j = conn.execute("SELECT state_usps FROM jurisdiction WHERE geoid=?",
                          (geoid,)).fetchone()
         usps = j["state_usps"] if j else geoid
-        return (live_framework(conn, usps), framework_flags, FRAMEWORK_SYSTEM,
-                "framework rule")
-    return (live_rows(conn, geoid, category), deterministic_flags, CHECK_SYSTEM,
-            "finding")
+        return (live_framework(conn, usps, thr_ids=_ids("threshold_rule"),
+                               ag_ids=_ids("authority_grant")),
+                framework_flags, FRAMEWORK_SYSTEM, "framework rule")
+    return (live_rows(conn, geoid, category, ids=_ids("tax_instrument")),
+            deterministic_flags, CHECK_SYSTEM, "finding")
 
 
 def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
-                  images=None, jurisdiction=None):
+                  images=None, jurisdiction=None, claim_ids=None):
     """Check what was just written for one work item and set its status.
 
     Returns (verdict, message). verdict is 'pass', 'flag', 'error', or
@@ -434,7 +526,12 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
     if not store.as_bool(settings.get("checker_enabled")):
         return "off", "checker disabled — human review required"
 
-    rows, flag_fn, system, noun = subject(conn, geoid, category)
+    rows, flag_fn, system, noun = subject(conn, geoid, category, claim_ids)
+    if not rows and claim_ids is not None:
+        # The ingest wrote nothing new for the subject table (pure re-run or
+        # updates the id filter can still see); judge what is on file instead
+        # of skipping the check.
+        rows, flag_fn, system, noun = subject(conn, geoid, category)
     if not rows:
         return "off", "nothing to check"
 

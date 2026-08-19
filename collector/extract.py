@@ -10,6 +10,7 @@ Providers:
 import base64
 import json
 import re
+import time
 
 import httpx
 
@@ -128,6 +129,29 @@ class ExtractError(Exception):
     pass
 
 
+class RetryableError(ExtractError):
+    """A provider fault — rate limit, overload, gateway error. It says
+    nothing about the jurisdiction or the prompt, so it is worth retrying
+    and must not count against the item's attempts."""
+
+
+# Statuses that mean "the provider is having a moment", not "this request is
+# wrong": timeouts, rate limits, server and gateway errors, and Anthropic's
+# 529 overloaded.
+RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504, 529)
+
+# A message the worker can test for to tell a provider outage apart from a
+# real extraction failure.
+PROVIDER_DOWN = "provider unavailable"
+
+
+def _status_error(prefix, status, body):
+    text = "%s %s: %s" % (prefix, status, (body or "")[:400])
+    if status in RETRYABLE_STATUS:
+        return RetryableError(text)
+    return ExtractError(text)
+
+
 def parse_json_payload(text):
     """Pull a JSON object out of a model response, including fenced blocks."""
     if text is None:
@@ -182,27 +206,40 @@ def chat(settings, prompt, system=SYSTEM, images=None, model=None, effort=None,
         return None, "no AI provider configured"
     images = images or []
     model = model or default_model(settings, provider)
-    try:
-        if provider == "openai":
-            raw = _openai_compat(
-                (settings.get("openai_base_url") or "https://api.openai.com/v1").rstrip("/"),
-                settings.get("openai_api_key") or "",
-                model, prompt, images=images, system=system)
-        elif provider == "anthropic":
-            raw = _anthropic(settings.get("anthropic_api_key") or "", model, prompt,
-                             images=images, system=system, effort=effort)
-        elif provider == "llama":
-            raw = _llama(
-                (settings.get("llama_base_url") or "http://127.0.0.1:11434").rstrip("/"),
-                settings.get("llama_api_key") or "",
-                model, prompt, images=images, system=system)
-        else:
-            return None, "unknown provider %r" % provider
-    except ExtractError as exc:
-        return None, str(exc)
-    except httpx.HTTPError as exc:
-        return None, "provider HTTP error: %s" % exc
-    return raw, None
+    tries = 3
+    last = None
+    for attempt in range(tries):
+        if attempt:
+            # 2s then 8s. A rate limit or a 529 usually clears in seconds;
+            # anything longer is the outage path below.
+            time.sleep(2 * (4 ** (attempt - 1)))
+        try:
+            if provider == "openai":
+                raw = _openai_compat(
+                    (settings.get("openai_base_url") or "https://api.openai.com/v1").rstrip("/"),
+                    settings.get("openai_api_key") or "",
+                    model, prompt, images=images, system=system)
+            elif provider == "anthropic":
+                raw = _anthropic(settings.get("anthropic_api_key") or "", model, prompt,
+                                 images=images, system=system, effort=effort)
+            elif provider == "llama":
+                raw = _llama(
+                    (settings.get("llama_base_url") or "http://127.0.0.1:11434").rstrip("/"),
+                    settings.get("llama_api_key") or "",
+                    model, prompt, images=images, system=system)
+            else:
+                return None, "unknown provider %r" % provider
+        except RetryableError as exc:
+            last = str(exc)
+            continue
+        except ExtractError as exc:
+            return None, str(exc)
+        except httpx.HTTPError as exc:
+            # Timeouts and connection errors are provider faults too.
+            last = str(exc)
+            continue
+        return raw, None
+    return None, "%s after %d attempts: %s" % (PROVIDER_DOWN, tries, last)
 
 
 def extract(settings, packet_text, documents_text, researcher="collector", images=None):
@@ -289,7 +326,7 @@ def _openai_compat(base_url, api_key, model, prompt, images=None, system=SYSTEM)
     with httpx.Client(timeout=180.0) as client:
         r = client.post(url, headers=headers, json=body)
         if r.status_code >= 400:
-            raise ExtractError("OpenAI-compatible API %s: %s" % (r.status_code, r.text[:400]))
+            raise _status_error("OpenAI-compatible API", r.status_code, r.text)
         data = r.json()
     try:
         return data["choices"][0]["message"]["content"]
@@ -334,7 +371,7 @@ def _anthropic(api_key, model, prompt, images=None, system=SYSTEM, effort=None):
     with httpx.Client(timeout=180.0) as client:
         r = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=body)
         if r.status_code >= 400:
-            raise ExtractError("Anthropic API %s: %s" % (r.status_code, r.text[:400]))
+            raise _status_error("Anthropic API", r.status_code, r.text)
         data = r.json()
     # A truncated answer is not a malformed one. Say which it was, so the log
     # reads "raise the cap", not "the model wrote garbage".

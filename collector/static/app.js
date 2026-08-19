@@ -152,6 +152,27 @@ document.getElementById("settings-form")?.addEventListener("submit", async (ev) 
   } catch (e) { toast(e.message, false); }
 });
 
+/* Removing a stored key: empty-means-unchanged protects secrets from every
+   ordinary save, so removal has to be its own deliberate flag. */
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("[data-clear-key]");
+  if (!btn) return;
+  const form = btn.closest("form");
+  const key = btn.dataset.clearKey;
+  const input = form && form.elements[key];
+  if (!input) return;
+  input.value = "";
+  let flag = form.elements[key + "__clear"];
+  if (!flag) {
+    flag = document.createElement("input");
+    flag.type = "hidden";
+    flag.name = key + "__clear";
+    form.appendChild(flag);
+  }
+  flag.value = "1";
+  toast("Key will be removed when you save.");
+});
+
 /* ── buttons that do one thing ──────────────────────────────────────── */
 
 function setStartButtons(running) {
