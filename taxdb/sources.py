@@ -209,6 +209,16 @@ STATE_BULK = [
      "agency_table", 2,
      "City rates with effective dates; sibling pages carry county, SPD, and "
      "transit rates. Quarterly updates."),
+    ("NM", "New Mexico GRT rates by location code",
+     "https://www.tax.newmexico.gov/governments/gross-receipts-location-code-and-tax-rate-map/",
+     "bulk_file", 2,
+     "Gross receipts rate schedule for every location code, published "
+     "January and July."),
+    ("SC", "South Carolina DOR sales and use tax rates",
+     "https://dor.sc.gov/tax/sales-and-use",
+     "agency_table", 2,
+     "Local option, capital project, and school district surtax rate charts "
+     "(ST-575/ST-427) by county."),
     # --- property tax rates and levies ---
     ("TX", "Texas Comptroller property tax rates and levies",
      "https://comptroller.texas.gov/taxes/property-tax/rates/index.php",
@@ -263,6 +273,81 @@ STATE_BULK = [
      "bulk_file", 2,
      "County clerk levy sheets rolled up: mill levies for every taxing "
      "subdivision."),
+    ("GA", "Georgia DOR county millage rates",
+     "https://dor.georgia.gov/local-government-services/digest-compliance/property-tax-millage-rates",
+     "bulk_file", 2,
+     "Ad valorem tax digest millage rates for every county's jurisdictions, "
+     "annual PDFs."),
+    ("NC", "North Carolina DOR property tax rates",
+     "https://www.ncdor.gov/taxes-forms/property-tax/property-tax-rates",
+     "agency_table", 2,
+     "County and municipal rates plus special district rates, annual tables."),
+    ("KY", "Kentucky DOR property tax rate books",
+     "https://revenue.ky.gov/Property/Pages/default.aspx",
+     "bulk_file", 2,
+     "Annual rate book (PDF and Excel) for every taxing district; the "
+     "year-stamped files are linked from this landing page."),
+    ("TN", "Tennessee Comptroller property tax rates",
+     "https://comptroller.tn.gov/office-functions/pa/tax-resources/assessment-information-for-each-county/property-tax-rates.html",
+     "agency_table", 2,
+     "County rates; the companion Tax Aggregate Report carries municipal and "
+     "special school district rates."),
+    ("SC", "South Carolina RFA millage rate limitations",
+     "https://rfa.sc.gov/data-research/local-government/property-tax/millage-caps",
+     "bulk_file", 2,
+     "Act 388 millage cap projections per jurisdiction -- a framework source. "
+     "Actual rates: SC Association of Counties annual report."),
+    ("MO", "Missouri State Auditor property tax rates report",
+     "https://auditor.mo.gov/AuditReport/ViewReport?report=2026006",
+     "bulk_file", 2,
+     "Every reviewed levy for ~2,800 taxing authorities incl. Hancock "
+     "ceilings. Report id is year-stamped; bump it annually."),
+    ("NE", "Nebraska property assessment division",
+     "https://revenue.nebraska.gov/PAD",
+     "bulk_file", 2,
+     "Certified levy rates and values per political subdivision, annual "
+     "reports."),
+    ("ID", "Idaho certified levy rates by district",
+     "https://tax.idaho.gov/property-tax-key/budget-and-levy/certification-of-levy-rates/",
+     "bulk_file", 2,
+     "Approved levy rates by county by district, yearly."),
+    ("UT", "Utah certified property tax rates",
+     "https://propertytax.utah.gov/rates/",
+     "agency_table", 2,
+     "Approved tax rates for every entity per year, from the Property Tax "
+     "Division."),
+    ("OR", "Oregon DOR property tax statistics",
+     "https://www.oregon.gov/dor/gov-research/pages/property_tax_statistics.aspx",
+     "bulk_file", 2,
+     "Rates and levies by taxing district; the Supplement carries the "
+     "district-level detail."),
+    ("NM", "New Mexico DFA certificates of property tax rates",
+     "https://www.nmdfa.state.nm.us/local-government/budget-finance-bureau/property-taxes/",
+     "bulk_file", 2,
+     "Certificates of tax rates per county per year, every levy incl. "
+     "voter-approved debt."),
+    ("MA", "Massachusetts DLS municipal databank",
+     "https://www.mass.gov/municipal-databank-data-analytics-including-cherry-sheets",
+     "bulk_file", 2,
+     "Tax rates, levies, and Prop 2 1/2 override and debt-exclusion VOTE "
+     "RESULTS per municipality. 403s scripted clients; use the browser path."),
+    ("CT", "Connecticut OPM mill rates",
+     "https://portal.ct.gov/opm/igpp/publications/mill-rates",
+     "bulk_file", 2,
+     "Mill rates for every town and district, annual."),
+    ("RI", "Rhode Island municipal finance tax rates",
+     "https://municipalfinance.ri.gov/financial-tax-data/tax-rates",
+     "bulk_file", 2,
+     "Rates for all 39 municipalities incl. fire districts, annual."),
+    ("NH", "New Hampshire DRA municipal reports",
+     "https://www.revenue.nh.gov/about-dra/municipal-and-property-division/municipal-and-property-reports",
+     "bulk_file", 2,
+     "Tax rates per town with the school/county/municipal split. 403s "
+     "scripted clients; use the browser path."),
+    ("ME", "Maine Revenue municipal services",
+     "https://www.maine.gov/revenue/taxes/property-tax/municipal-services",
+     "bulk_file", 2,
+     "Full-value tax rates per municipality, annual."),
     # --- local income / payroll ---
     ("OH", "Ohio municipal income tax rate database (The Finder)",
      "https://thefinder.tax.ohio.gov/",
@@ -289,6 +374,32 @@ STATE_BULK = [
      "https://www.michigan.gov/taxes/citytax",
      "agency_table", 2,
      "The complete list of Michigan's city income taxes and rates."),
+    # --- per-unit local finance databases (levy/no-levy priors, all taxes) ---
+    ("IN", "Indiana Gateway local government data",
+     "https://gateway.ifionline.org/",
+     "bulk_file", 2,
+     "Certified budgets, rates, levies, and debt for every Indiana unit, "
+     "downloadable. The rate answer for Indiana property taxes."),
+    ("IA", "Iowa open data portal (local tax datasets)",
+     "https://data.iowa.gov/",
+     "bulk_file", 2,
+     "City/county/school property tax rates and levies, plus school income "
+     "surtax rates, as queryable datasets."),
+    ("NY", "NY State Comptroller local government data",
+     "https://www.osc.ny.gov/local-government/data",
+     "bulk_file", 2,
+     "Levies, revenues by source, constitutional tax limits, and sales tax "
+     "distributions for every local government."),
+    ("CA", "California State Controller By the Numbers",
+     "https://bythenumbers.sco.ca.gov/",
+     "bulk_file", 2,
+     "City and county revenues by source (TOT, UUT, parcel taxes visible as "
+     "line items). Levy/no-levy prior, silent on rates."),
+    ("VA", "Virginia Local Tax Rates (Cooper Center)",
+     "https://www.coopercenter.org/virginia-local-tax-rates",
+     "secondary", 4,
+     "Annual survey of every VA locality's rates across all local taxes, with "
+     "a data file. Orient here, cite the local ordinance."),
     # --- lodging and local-option taxes ---
     ("FL", "Florida EDR county and municipal data",
      "https://edr.state.fl.us/Content/local-government/data/county-municipal/index.cfm",
@@ -299,6 +410,11 @@ STATE_BULK = [
      "https://comptroller.texas.gov/transparency/local/hotel-reporting/",
      "bulk_file", 2,
      "Municipal HOT rates and receipts, self-reported to the Comptroller."),
+    ("GA", "Georgia DCA hotel-motel excise tax",
+     "https://dca.georgia.gov/community-assistance/government-authority-reporting/hotel-motel-excise-tax",
+     "bulk_file", 2,
+     "Rates and revenues report for every city and county levying the tax, "
+     "with the authorizing code paragraph."),
     # --- election results for the measures pass ---
     ("OH", "Ohio SOS election results and data",
      "https://www.ohiosos.gov/elections/election-results-and-data/",
@@ -319,6 +435,15 @@ STATE_BULK = [
      "secondary", 4,
      "Tracks every CA local revenue measure with pass/fail and vote shares. "
      "Cross-check for CEDA; cite the county canvass, not this."),
+    ("WI", "Wisconsin DPI school referenda database",
+     "https://dpi.wi.gov/sfs/reporting/safr/referenda-info",
+     "bulk_file", 2,
+     "Every school district referendum since 1990: question, amount, vote "
+     "result. The custom-report app it links blocks scripted clients."),
+    ("MI", "Michigan SOS election results",
+     "https://www.michigan.gov/sos/elections",
+     "portal", 2,
+     "Official results archive incl. local proposals and millage questions."),
 ]
 
 
