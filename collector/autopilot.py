@@ -116,7 +116,7 @@ def next_action(conn, settings):
 
     # Statute corpus for a state whose framework work is still open.
     if store.as_bool(settings.get("autopilot_statutes")):
-        usps = _state_needing_statutes(conn, states)
+        usps = _state_needing_statutes(conn, states, settings)
         if usps and not _tried_recently(conn, STATUTES + ":" + usps,
                                        COOLDOWN_HOURS[STATUTES]):
             return STATUTES, {"usps": usps}, \
@@ -151,7 +151,21 @@ def _kinds(settings):
     return tuple(k for k in kinds if k in ("county", "place", "mcd")) or ("county", "place")
 
 
-def _state_needing_statutes(conn, states):
+def _statutes_absent(settings):
+    """States the current snapshot has no statute corpus for.
+
+    Sorting by population means an unsatisfiable state stays at the head of
+    this queue forever: Georgia is not in the v2026.08 statute corpus, and
+    before this it was chosen every cooldown, failed on a 404, and no other
+    state's statutes were ever downloaded.
+    """
+    from taxdb import statutes
+    prefix = "statutes_absent:%s:" % statutes.SNAPSHOT
+    return {key[len(prefix):] for key, value in (settings or {}).items()
+            if key.startswith(prefix) and store.as_bool(value)}
+
+
+def _state_needing_statutes(conn, states, settings=None):
     """A state with open framework work and no statute text on file."""
     sql = ("SELECT j.state_usps FROM work_item w "
            "JOIN jurisdiction j ON j.geoid = w.geoid "
@@ -162,6 +176,10 @@ def _state_needing_statutes(conn, states):
     if states:
         sql += " AND j.state_usps IN (%s)" % ",".join("?" * len(states))
         params += states
+    absent = _statutes_absent(settings)
+    if absent:
+        sql += " AND j.state_usps NOT IN (%s)" % ",".join("?" * len(absent))
+        params += sorted(absent)
     sql += " ORDER BY COALESCE(j.population,0) DESC LIMIT 1"
     row = conn.execute(sql, params).fetchone()
     return row["state_usps"] if row else None

@@ -320,6 +320,9 @@ def new_diag():
     """
     return {"queries": 0, "answered": 0, "blocked": 0, "hits": 0,
             "kept": 0, "provider": None, "skipped": 0, "benched": {},
+            # Paid search API calls made this round, and calls the reuse of a
+            # cached result saved. record_round banks both.
+            "api_calls": 0, "reused": 0,
             # Per-query outcomes for the search log. by_query is cleared by
             # searchlog.record_round; tried accumulates for the whole item so
             # the mid-crawl retry never re-runs wording this item already ran.
@@ -330,6 +333,28 @@ def new_diag():
 # documented allowance; a scraped result page does not, and throttles by IP.
 AUTO_QPM_API = 60
 AUTO_QPM_SCRAPE = 12
+
+
+def api_month(now=None):
+    """The calendar month the paid-search counter is keeping, as YYYY-MM."""
+    return (now or db.now())[:7]
+
+
+def paid_search_calls(settings):
+    """Paid search calls made in the current month, per the settings."""
+    if (settings.get("search_api_month") or "") != api_month():
+        return 0                       # a new month; the old count is history
+    return store.as_int(settings.get("search_api_calls"), 0)
+
+
+def paid_search_exhausted(settings):
+    """True when this month's paid-search ceiling has been reached.
+
+    A ceiling of 0 means the provider's own plan is the only limit. Reaching
+    the ceiling never stops the crawl: the scraped engines are still asked.
+    """
+    cap = store.as_int(settings.get("search_api_monthly_cap"), 0)
+    return bool(cap) and paid_search_calls(settings) >= cap
 
 
 def search_rate(settings, provider):
@@ -357,6 +382,13 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
     diag["provider"] = provider
 
     qpm = search_rate(settings, provider)
+    # The cap is read from the settings snapshot this run was started with, so
+    # a long run can overshoot by the calls it makes itself. That is the point
+    # of a soft ceiling: it keeps the allowance from being drained overnight
+    # without ever stopping the crawl, which drops to the scraped engines.
+    paid_exhausted = paid_search_exhausted(settings)
+    if paid_exhausted and provider == "brave":
+        diag["paid_capped"] = True
     out = []
     seen = set()
     if queries is None:
@@ -367,9 +399,11 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
             q, {"kept": 0, "blocked": False})
         diag.setdefault("tried", set()).add(q)
         engines = []
-        if provider == "brave" and api_key:
-            engines.append(
-                ("brave", lambda: _brave_search(client, api_key, q, limit=8)))
+        if provider == "brave" and api_key and not paid_exhausted:
+            def paid(query=q):
+                diag["api_calls"] = diag.get("api_calls", 0) + 1
+                return _brave_search(client, api_key, query, limit=8)
+            engines.append(("brave", paid))
         engines.append(("duckduckgo", lambda: _ddg_search(client, q, limit=8)))
         engines.append(("bing", lambda: _bing_search(client, q, limit=8)))
 
@@ -416,6 +450,7 @@ def search_web(client, name, state, category, kind=None, limit=12, settings=None
             out.append(url)
             diag["kept"] += 1
             qrec["kept"] += 1
+            qrec.setdefault("urls", []).append(url)
             if len(out) >= limit:
                 return out
     return out
@@ -1113,15 +1148,29 @@ def item_seeds(conn, client, settings, geoid, category, name, state, kind,
         queries = searchlog.plan_round(
             conn, settings, geoid, category,
             search_queries(name, state, category, kind))
-        seed_urls.extend(search_web(client, name, state, category, kind=kind,
-                                    settings=settings, diag=diag,
-                                    queries=queries))
-        # Retry only when every engine refused the first pass. Repeating the
-        # same queries after a genuine zero-result search just burns quota.
-        if not seed_urls and diag is not None and diag.get("blocked"):
-            seed_urls.extend(search_web(client, name, state, category, kind=kind,
-                                        settings=settings, diag=diag,
-                                        queries=queries))
+        # Anything this item already asked recently, and got an answer to, is
+        # answered from the log instead of the search API. A blocked item that
+        # comes back four times used to pay for the same searches four times.
+        cached, queries = searchlog.reuse(conn, settings, geoid, category,
+                                         queries)
+        if cached:
+            diag["reused"] = diag.get("reused", 0) + len(cached)
+            known = set(seed_urls)
+            for url in cached:
+                if url not in known:
+                    known.add(url)
+                    seed_urls.append(url)
+        if queries:
+            seed_urls.extend(search_web(client, name, state, category,
+                                        kind=kind, settings=settings,
+                                        diag=diag, queries=queries))
+            # Retry only when every engine refused the first pass. Repeating
+            # the same queries after a genuine zero-result search just burns
+            # quota.
+            if not seed_urls and diag is not None and diag.get("blocked"):
+                seed_urls.extend(search_web(client, name, state, category,
+                                            kind=kind, settings=settings,
+                                            diag=diag, queries=queries))
         searchlog.record_round(conn, geoid, category, diag)
     return seed_urls
 

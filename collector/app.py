@@ -1113,6 +1113,19 @@ def api_logs_export(_: bool = Depends(_auth)):
         except Exception as exc:
             return ["query failed: %s" % exc]
 
+    def counts_of(rows):
+        """One `label: count` line per query. Rows are (label, sql[, params])."""
+        lines = []
+        for row in rows:
+            label, sql = row[0], row[1]
+            params = row[2] if len(row) > 2 else ()
+            try:
+                value = conn.execute(sql, params).fetchone()[0]
+            except Exception as exc:
+                value = "query failed: %s" % exc
+            lines.append("%-26s %s" % (label + ":", value))
+        return lines
+
     try:
         s = store.get_all(conn)
         section("FSSDataHub diagnostic", [
@@ -1123,12 +1136,68 @@ def api_logs_export(_: bool = Depends(_auth)):
         ])
         section("Settings (secrets masked)",
                 [json.dumps(store.mask(s), indent=1, sort_keys=True)])
+        # What is actually in the database. Without this the report could show
+        # a hundred errors and still leave "is it collecting anything at all?"
+        # unanswerable, which is the first question anyone asks of it.
+        section("Contents", counts_of([
+            ("jurisdictions", "SELECT COUNT(*) FROM jurisdiction"),
+            ("tax instruments", "SELECT COUNT(*) FROM tax_instrument "
+                                "WHERE superseded_by IS NULL"),
+            ("  from a bulk adapter",
+             "SELECT COUNT(*) FROM tax_instrument WHERE superseded_by IS NULL "
+             "AND extraction_method='bulk_import'"),
+            ("  from the crawler",
+             "SELECT COUNT(*) FROM tax_instrument WHERE superseded_by IS NULL "
+             "AND extraction_method<>'bulk_import'"),
+            ("ballot measures", "SELECT COUNT(*) FROM ballot_measure"),
+            ("archived files", "SELECT COUNT(*) FROM archive_file"),
+            ("pages crawled", "SELECT COUNT(*) FROM crawl_page"),
+            ("checks run", "SELECT COUNT(*) FROM check_result"),
+            ("search queries logged", "SELECT COUNT(*) FROM search_query"),
+            ("  with reusable results",
+             "SELECT COUNT(*) FROM search_query WHERE results IS NOT NULL"),
+        ]) + [
+            "%-26s %s" % ("paid search calls:",
+                          "%s in %s" % (s.get("search_api_calls") or 0,
+                                        s.get("search_api_month") or "(none yet)")),
+            "%-26s %s" % ("paid search ceiling:",
+                          s.get("search_api_monthly_cap") or "0 (none of our own)"),
+        ])
+        section("Work items by status", rows_of(
+            "SELECT status, COUNT(*) AS n FROM work_item "
+            "GROUP BY status ORDER BY n DESC")
+            # Items an adapter answered are filed complete without anyone
+            # deciding anything, including items the crawler had just sent to
+            # review. Counting them here is what keeps that sweep honest.
+            + counts_of([
+                ("  filed from bulk",
+                 "SELECT COUNT(*) FROM work_item WHERE last_error=?",
+                 (ledger.BULK_NOTE,)),
+            ]))
+        section("Batch items by status", rows_of(
+            "SELECT status, COUNT(*) AS n FROM extract_batch_item "
+            "GROUP BY status ORDER BY n DESC"))
+        section("Checker verdicts", rows_of(
+            "SELECT verdict, COUNT(*) AS n FROM check_result "
+            "GROUP BY verdict ORDER BY n DESC"))
         section("Worker snapshot",
                 [json.dumps(worker.snapshot(), indent=1, default=str)])
         section("Recent runs (newest first)", rows_of(
             "SELECT id, mode, status, message, items_claimed, pages_fetched, "
             "findings_written, started_at, finished_at FROM crawl_run "
             "ORDER BY id DESC LIMIT 50"))
+        # One line per host beats a hundred rows of URLs when the question is
+        # "who is refusing us": the last report was 77 403s that turned out to
+        # be six sites, which is a per-host decision, not ninety-seven.
+        section("Hosts that refused us", rows_of(
+            "SELECT host, COUNT(*) AS n, MAX(fetched_at) AS last_seen FROM ("
+            "  SELECT CASE WHEN instr(rest, '/') > 0 "
+            "              THEN substr(rest, 1, instr(rest, '/') - 1) "
+            "              ELSE rest END AS host, fetched_at "
+            "  FROM (SELECT substr(url, instr(url, '://') + 3) AS rest, "
+            "               fetched_at FROM crawl_page "
+            "        WHERE error IS NOT NULL OR http_status IN (401,403,429))"
+            ") GROUP BY host ORDER BY n DESC, host LIMIT 30"))
         section("Recent page errors", rows_of(
             "SELECT fetched_at, geoid, category, http_status, url, error "
             "FROM crawl_page WHERE error IS NOT NULL ORDER BY id DESC LIMIT 100"))
@@ -1136,12 +1205,16 @@ def api_logs_export(_: bool = Depends(_auth)):
             "SELECT created_at, geoid, category, provider, model, error "
             "FROM crawl_extract WHERE parsed_ok=0 ORDER BY id DESC LIMIT 50"))
         section("Batches", rows_of(
-            "SELECT id, status, n_items, n_succeeded, n_failed, message, "
-            "created_at, submitted_at, collected_at FROM extract_batch "
+            "SELECT id, status, n_items, n_succeeded, n_empty, n_failed, "
+            "message, created_at, submitted_at, collected_at FROM extract_batch "
             "ORDER BY id DESC LIMIT 25"))
-        section("Failed batch items", rows_of(
+        # Not just status='failed'. An item that was read fine and held
+        # nothing closes as 'done' with the reason in `error`, and filtering
+        # those out left a report claiming 88 failures with nothing to show.
+        section("Batch items that produced nothing", rows_of(
             "SELECT id, geoid, category, status, error FROM extract_batch_item "
-            "WHERE status='failed' ORDER BY id DESC LIMIT 50"))
+            "WHERE status='failed' OR (status='done' AND error IS NOT NULL) "
+            "ORDER BY id DESC LIMIT 50"))
         section("Checker flags and errors", rows_of(
             "SELECT created_at, geoid, category, verdict, flags "
             "FROM check_result WHERE verdict != 'pass' "

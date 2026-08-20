@@ -36,6 +36,25 @@ def _migrate(conn):
     except Exception:
         pass
 
+    # "Read fine, found nothing" split out from "could not be read" (v0.6.2),
+    # so a batch of honest empty results stops reading as a failed pipeline.
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(extract_batch)")}
+        if cols and "n_empty" not in cols:
+            conn.execute("ALTER TABLE extract_batch ADD COLUMN n_empty "
+                         "INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+
+    # Cached search hits, so a retried item stops re-asking the search API
+    # questions it already has answers for (v0.6.2).
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(search_query)")}
+        if cols and "results" not in cols:
+            conn.execute("ALTER TABLE search_query ADD COLUMN results TEXT")
+    except Exception:
+        pass
+
     # The checker's recommendation for the reviewer (v0.6.0). Cheap retrofit.
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(check_result)")}
@@ -65,7 +84,14 @@ def _migrate(conn):
             " pages_fetched INTEGER NOT NULL DEFAULT 0,"
             " findings_written INTEGER NOT NULL DEFAULT 0,"
             " started_at TEXT NOT NULL, finished_at TEXT, message TEXT)")
-        conn.execute("INSERT INTO crawl_run SELECT * FROM crawl_run_old")
+        # Named columns, for the same reason as extract_batch below.
+        conn.execute(
+            "INSERT INTO crawl_run (id, mode, status, provider, filter_states, "
+            "items_claimed, pages_fetched, findings_written, started_at, "
+            "finished_at, message) "
+            "SELECT id, mode, status, provider, filter_states, items_claimed, "
+            "pages_fetched, findings_written, started_at, finished_at, message "
+            "FROM crawl_run_old")
         conn.execute("DROP TABLE crawl_run_old")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cr_started ON crawl_run(started_at DESC)")
         conn.execute("PRAGMA legacy_alter_table=OFF")
@@ -94,9 +120,20 @@ def _migrate(conn):
             " n_items INTEGER NOT NULL DEFAULT 0,"
             " n_succeeded INTEGER NOT NULL DEFAULT 0,"
             " n_failed INTEGER NOT NULL DEFAULT 0,"
+            " n_empty INTEGER NOT NULL DEFAULT 0,"
             " created_at TEXT NOT NULL,"
             " submitted_at TEXT, collected_at TEXT, message TEXT)")
-        conn.execute("INSERT INTO extract_batch SELECT * FROM extract_batch_old")
+        # Columns named, not SELECT *. The old table may carry columns this
+        # rebuild does not list (n_empty, added by the retrofit above, which
+        # runs first), and positional copying breaks the moment the two
+        # disagree — with a startup crash, on exactly the oldest databases.
+        conn.execute(
+            "INSERT INTO extract_batch (id, remote_id, provider, model, "
+            "status, n_items, n_succeeded, n_failed, created_at, "
+            "submitted_at, collected_at, message) "
+            "SELECT id, remote_id, provider, model, status, n_items, "
+            "n_succeeded, n_failed, created_at, submitted_at, collected_at, "
+            "message FROM extract_batch_old")
         conn.execute("DROP TABLE extract_batch_old")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_eb_status "
                      "ON extract_batch(status, id)")
@@ -319,11 +356,25 @@ def start_run(conn, mode, provider=None, filter_states=None):
     return cur.lastrowid
 
 
-def finish_run(conn, run_id, status, message=None, items=0, pages=0, findings=0):
-    conn.execute(
-        "UPDATE crawl_run SET status=?, finished_at=?, message=?, "
-        "items_claimed=?, pages_fetched=?, findings_written=? WHERE id=?",
-        (status, db.now(), message, items, pages, findings, run_id))
+def finish_run(conn, run_id, status, message=None, items=None, pages=None,
+               findings=None):
+    """Close a run out. Counters are only written when they are given.
+
+    A counter left out keeps whatever `bump_run` accumulated. That matters for
+    batch extraction: the crawl parks its pages and the findings arrive
+    minutes later, long after the run that fetched them has been closed, so a
+    finish that wrote its own totals unconditionally erased them and every
+    continuous run read `0 findings` however much it had produced.
+    """
+    sets = ["status=?", "finished_at=?", "message=?"]
+    params = [status, db.now(), message]
+    for column, value in (("items_claimed", items), ("pages_fetched", pages),
+                          ("findings_written", findings)):
+        if value is not None:
+            sets.append("%s=?" % column)
+            params.append(value)
+    params.append(run_id)
+    conn.execute("UPDATE crawl_run SET %s WHERE id=?" % ", ".join(sets), params)
     conn.commit()
 
 

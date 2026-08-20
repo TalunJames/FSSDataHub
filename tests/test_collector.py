@@ -280,6 +280,34 @@ class StoreTests(DbTest):
         self.assertEqual(row["status"], "ok")
         self.assertEqual(row["pages_fetched"], 3)
 
+    def test_finish_run_keeps_counters_it_was_not_given(self):
+        """Batch extraction lands findings after the run is closed.
+
+        finish_run used to write its own totals unconditionally, so the
+        crawl's tally of zero erased whatever a batch had credited and every
+        continuous run reported 0 findings.
+        """
+        rid = self.store.start_run(self.conn, "continuous", provider="none")
+        self.store.bump_run(self.conn, rid, items=2, pages=40, findings=0)
+        self.store.finish_run(self.conn, rid, "ok", "note")
+        self.store.bump_run(self.conn, rid, findings=7)
+        row = self.conn.execute(
+            "SELECT * FROM crawl_run WHERE id=?", (rid,)).fetchone()
+        self.assertEqual(row["status"], "ok")
+        self.assertEqual(row["items_claimed"], 2)
+        self.assertEqual(row["pages_fetched"], 40)
+        self.assertEqual(row["findings_written"], 7)
+        self.assertIsNotNone(row["finished_at"])
+
+    def test_finish_run_still_writes_counters_it_is_given(self):
+        """The single-shot passes have no bumps to preserve."""
+        rid = self.store.start_run(self.conn, "fetch", provider="none")
+        self.store.finish_run(self.conn, rid, "ok", "sst", findings=6176)
+        row = self.conn.execute(
+            "SELECT * FROM crawl_run WHERE id=?", (rid,)).fetchone()
+        self.assertEqual(row["findings_written"], 6176)
+        self.assertEqual(row["pages_fetched"], 0)
+
     def test_schema_tables_exist(self):
         names = {r[0] for r in self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}

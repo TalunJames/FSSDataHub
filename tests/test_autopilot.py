@@ -154,6 +154,61 @@ class AutopilotTest(DbTest):
         action, _, _ = self._next()
         self.assertNotEqual(action, self.autopilot.SST)
 
+    def _framework_pending(self):
+        """Both states waiting on framework work, neither with statutes.
+
+        The framework items hang off the state rows, so those are the
+        populations the biggest-first ordering actually reads.
+        """
+        self._states()
+        self._locals()
+        self.source(url="https://tax.example.gov/")
+        ledger.plan(self.conn, states=["OH", "WA"], kinds=("state",),
+                    categories=[FRAMEWORK])
+        for usps, pop in (("OH", 11800000), ("WA", 7700000)):
+            self.conn.execute(
+                "UPDATE jurisdiction SET population=? "
+                "WHERE kind='state' AND state_usps=?", (pop, usps))
+        self.conn.commit()
+
+    def test_statutes_are_offered_for_the_biggest_state_first(self):
+        self._framework_pending()
+        self.settings["autopilot_statutes"] = "1"
+        self.assertEqual(
+            self.autopilot._state_needing_statutes(
+                self.conn, None, self.settings), "OH")
+
+    def test_a_state_the_snapshot_does_not_publish_is_skipped(self):
+        """Georgia has no statute corpus in v2026.08.
+
+        Sorting by population meant the unsatisfiable state stayed at the head
+        of this queue forever, so no other state's statutes were ever fetched.
+        """
+        from taxdb import statutes
+        self._framework_pending()
+        self.settings["autopilot_statutes"] = "1"
+        self.settings["statutes_absent:%s:OH" % statutes.SNAPSHOT] = "1"
+        self.assertEqual(
+            self.autopilot._state_needing_statutes(
+                self.conn, None, self.settings), "WA")
+
+    def test_a_marker_for_another_snapshot_is_ignored(self):
+        self._framework_pending()
+        self.settings["autopilot_statutes"] = "1"
+        self.settings["statutes_absent:v1999.01:OH"] = "1"
+        self.assertEqual(
+            self.autopilot._state_needing_statutes(
+                self.conn, None, self.settings), "OH")
+
+    def test_every_state_unavailable_moves_the_autopilot_on(self):
+        from taxdb import statutes
+        self._framework_pending()
+        self.settings["autopilot_statutes"] = "1"
+        for usps in ("OH", "WA"):
+            self.settings["statutes_absent:%s:%s" % (statutes.SNAPSHOT, usps)] = "1"
+        self.assertIsNone(self.autopilot._state_needing_statutes(
+            self.conn, None, self.settings))
+
     def test_state_filter_is_honoured(self):
         self._states()
         self._locals()

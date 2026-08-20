@@ -206,3 +206,70 @@ class DiagnosticExportTests(unittest.TestCase):
         self.assertIn("Application log", body)
         # No secret material, masked or not, beyond the masked settings dump.
         self.assertNotIn("sk-ant", body)
+
+    def test_export_says_what_is_in_the_database(self):
+        """The report used to carry every error and no totals, which left
+        "is it collecting anything at all?" unanswerable."""
+        body = self.client.get("/api/logs/export").text
+        for heading in ("Contents", "Work items by status",
+                        "Batch items by status", "Checker verdicts"):
+            self.assertIn(heading, body)
+        for label in ("jurisdictions:", "tax instruments:",
+                      "  from a bulk adapter:", "  from the crawler:",
+                      "  filed from bulk:"):
+            self.assertIn(label, body)
+
+    def test_export_shows_reads_that_produced_nothing(self):
+        """An empty read closes as 'done'; the old panel only showed
+        'failed', so the commonest outcome was invisible."""
+        from taxdb import db as dbmod
+        from collector import store
+        conn = store.connect()
+        try:
+            store.apply_schema(conn)
+            run_id = store.start_run(conn, "continuous")
+            conn.execute(
+                "INSERT INTO extract_batch (provider, status, n_items, "
+                "created_at) VALUES ('anthropic','collected',1,?)",
+                (dbmod.now(),))
+            conn.execute(
+                "INSERT INTO extract_batch_item (batch_id, custom_id, run_id, "
+                "geoid, category, packet, n_pages, status, error, created_at) "
+                "VALUES (1,'x-1',?, '39049','property','p',3,'done',"
+                "'extractor returned 0 valid rows (2 rejected); pages archived',?)",
+                (run_id, dbmod.now()))
+            conn.commit()
+        finally:
+            conn.close()
+        body = self.client.get("/api/logs/export").text
+        self.assertIn("Batch items that produced nothing", body)
+        self.assertIn("0 valid rows", body)
+
+    def test_export_groups_refusals_by_host(self):
+        """77 refusals turned out to be six sites. That is the useful shape."""
+        from taxdb import db as dbmod
+        from collector import store
+        conn = store.connect()
+        try:
+            store.apply_schema(conn)
+            run_id = store.start_run(conn, "continuous")
+            rows = [("https://www.mass.gov/a", 403), ("https://www.mass.gov/b", 403),
+                    ("https://auditor.example.gov/c", 403),
+                    ("https://fine.example.gov/d", 200)]
+            for url, status in rows:
+                conn.execute(
+                    "INSERT INTO crawl_page (run_id, geoid, category, url, "
+                    "http_status, error, fetched_at) VALUES (?,?,?,?,?,?,?)",
+                    (run_id, "39049", "property", url, status,
+                     "blocked" if status == 403 else None, dbmod.now()))
+            conn.commit()
+        finally:
+            conn.close()
+        body = self.client.get("/api/logs/export").text
+        start = body.find("Hosts that refused us")
+        end = body.find("Recent page errors")
+        block = body[start:end]
+        self.assertIn('"host": "www.mass.gov", "n": 2', block)
+        self.assertIn("auditor.example.gov", block)
+        # A page that came back fine is not a refusal.
+        self.assertNotIn("fine.example.gov", block)

@@ -233,7 +233,12 @@
           {% if settings.search_api_key_set %}<button type="button" class="btn btn-secondary" data-clear-key="search_api_key">Remove key</button>{% endif %}
           <label>Search queries per minute <span class="dim"><code>auto</code>, or 0 for no limit</span>
             <input name="search_qpm" value="{{ settings.search_qpm }}"></label>
+          <label>Reuse search results for <span class="dim">days; 0 to always search again</span>
+            <input type="number" name="search_cache_days" value="{{ settings.search_cache_days }}"></label>
+          <label>Paid search calls a month <span class="dim">0 for no ceiling of our own</span>
+            <input type="number" name="search_api_monthly_cap" value="{{ settings.search_api_monthly_cap }}"></label>
         </div>
+        <p class="hint">Paid search calls this month: <strong>{{ settings.search_api_calls or 0 }}</strong>{% if settings.search_api_monthly_cap and settings.search_api_monthly_cap != '0' %} of {{ settings.search_api_monthly_cap }}{% endif %}{% if settings.search_api_month %} ({{ settings.search_api_month }}){% endif %}. Reaching your own ceiling does not stop a run: the crawler carries on with the scraped engines. Wording an item already tried, that found something, is answered from the search log for the number of days above instead of being asked again — which is where most of a metered allowance used to go.</p>
         <p class="hint">Without a key the crawler scrapes public result pages, which get throttled and blocked. When that happens the run says so rather than reporting an empty result as if it were an answer.</p>
         <p class="hint">The query ceiling is for the whole app, not per worker: <code>auto</code> is 60 a minute with a key and 12 without. An engine that starts refusing is benched with escalating backoff while the next one answers, so a throttle costs coverage rather than quietly returning nothing. Without a key this is the real limit on how fast the database fills — at about five queries a place, twelve a minute is roughly two places a minute however many run at once.</p>
         <label class="check"><input type="checkbox" name="strict_robots" value="1" {% if settings.strict_robots=='1' %}checked{% endif %}> Fail closed if robots.txt cannot be fetched <span class="dim">legacy engine only</span></label>

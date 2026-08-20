@@ -129,6 +129,10 @@ CREATE TABLE IF NOT EXISTS search_query (
     tries           INTEGER NOT NULL DEFAULT 0,
     last_outcome    TEXT,
     last_kept       INTEGER,
+    -- The official URLs this wording found, as JSON. A retried item used to
+    -- re-ask the search API the same question to be handed the same answer,
+    -- which is most of what a metered search allowance gets spent on.
+    results         TEXT,
     created_at      TEXT NOT NULL,
     last_tried_at   TEXT,
     UNIQUE(geoid, category, query)
@@ -170,7 +174,12 @@ CREATE TABLE IF NOT EXISTS extract_batch (
                         'unconfirmed')),
     n_items         INTEGER NOT NULL DEFAULT 0,
     n_succeeded     INTEGER NOT NULL DEFAULT 0,
+    -- 'failed' is a result we could not read: an API error, unparseable JSON,
+    -- an ingest that raised. 'empty' is a result we read fine that contained
+    -- nothing usable. Counting the two together made a batch of perfectly
+    -- healthy reads that simply found no rates look like a broken pipeline.
     n_failed        INTEGER NOT NULL DEFAULT 0,
+    n_empty         INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
     submitted_at    TEXT,
     collected_at    TEXT,

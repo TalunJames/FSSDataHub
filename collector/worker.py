@@ -95,10 +95,15 @@ def _close_orphaned_runs(conn):
     live forever. Safe here: this process has not started a run yet, and
     only one process owns the database.
     """
+    # Stamped with the run's own last sign of life, not with now. A run
+    # interrupted at 00:39 and found by a restart at 15:50 read as a
+    # fifteen-hour run, which is the opposite of what the run table is for.
     conn.execute(
-        "UPDATE crawl_run SET status='failed', finished_at=?, "
+        "UPDATE crawl_run SET status='failed', "
+        "finished_at=COALESCE((SELECT MAX(p.fetched_at) FROM crawl_page p "
+        "                      WHERE p.run_id = crawl_run.id), started_at), "
         "message='interrupted — the collector was restarted' "
-        "WHERE status='running'", (db.now(),))
+        "WHERE status='running'")
     conn.commit()
 
 
@@ -232,13 +237,15 @@ def _batch_tick():
         if not batch.enabled(s) and not batch.pending_work(conn):
             return
         out = batch.tick(conn, s)
-        if out["collected"] or out["failed"] or out["submitted"] \
+        if out["collected"] or out["failed"] or out["empty"] or out["submitted"] \
                 or out.get("requeued"):
             bits = []
             if out["submitted"]:
                 bits.append("sent %d for batch reading" % out["submitted"])
             if out["collected"]:
                 bits.append("read back %d" % out["collected"])
+            if out["empty"]:
+                bits.append("%d had nothing to record" % out["empty"])
             if out["failed"]:
                 bits.append("%d came back unusable" % out["failed"])
             if out["ready"]:
@@ -421,7 +428,8 @@ def _run_batch(mode, limit):
         _set(state="running", mode=mode, run_id=run_id, message="")
         rows = _claim(conn, s, limit)
         if not rows:
-            store.finish_run(conn, run_id, "ok", "queue empty for current filters",
+            store.finish_run(conn, run_id, "ok",
+                             "queue empty for current filters",
                              items=0, pages=0, findings=0)
             _set(state="idle", message="queue empty — plan work first")
             return True
@@ -484,6 +492,13 @@ def _run_batch(mode, limit):
                         _slot_clear(slot)
             finally:
                 wconn.close()
+                if fetcher_mod is not None:
+                    # This thread retires with the run. Its Crawlee event loop
+                    # goes with it, or every run would strand one.
+                    try:
+                        fetcher_mod.close_thread_loop()
+                    except Exception:
+                        pass
 
         threads = [threading.Thread(target=run_slot, args=(i,), daemon=True,
                                     name="collector-w%d" % i)
@@ -510,9 +525,10 @@ def _run_batch(mode, limit):
 
         stopped = _cancel.is_set()
         if stopped:
-            store.finish_run(conn, run_id, "stopped", "stopped by operator",
-                             items=tally["items"], pages=tally["pages"],
-                             findings=tally["findings"])
+            # Counters are left to the per-item bumps: with batch
+            # extraction the findings for these pages land after this run is
+            # closed, and writing the tally here would erase them.
+            store.finish_run(conn, run_id, "stopped", "stopped by operator")
             _set(state="idle", message="stopped", step="",
                  current_geoid=None, current_name=None)
             _cancel.clear()
@@ -525,8 +541,7 @@ def _run_batch(mode, limit):
         if abandoned_note:
             bits.append(abandoned_note)
         note = "; ".join(bits) or None
-        store.finish_run(conn, run_id, "ok", note, items=tally["items"],
-                         pages=tally["pages"], findings=tally["findings"])
+        store.finish_run(conn, run_id, "ok", note)
         _set(state="idle", current_geoid=None, current_name=None, step="",
              message="finished %s: %d item(s), %d page(s), %d finding(s)%s"
              % (mode, tally["items"], tally["pages"], tally["findings"],
@@ -534,9 +549,7 @@ def _run_batch(mode, limit):
         return True
     except Exception as exc:
         if run_id:
-            store.finish_run(conn, run_id, "failed", str(exc)[:500],
-                             items=tally["items"], pages=tally["pages"],
-                             findings=tally["findings"])
+            store.finish_run(conn, run_id, "failed", str(exc)[:500])
         _set(state="error", message=str(exc)[:500])
         return True
     finally:
@@ -839,6 +852,19 @@ def run_cog(force=False):
         _job.release()
 
 
+def _looks_like_missing_corpus(exc):
+    """A 404 on the parquet means the snapshot does not carry that state."""
+    text = str(exc)
+    return "404" in text and "not found" in text.lower()
+
+
+def statutes_absent_key(usps, snapshot=None):
+    """Settings key remembering that a snapshot has no statutes for a state."""
+    from taxdb import statutes
+    return "statutes_absent:%s:%s" % (snapshot or statutes.SNAPSHOT,
+                                      usps.upper())
+
+
 def run_statutes(usps, force=False):
     from taxdb import statutes
     if not _job.acquire(timeout=2):
@@ -855,7 +881,25 @@ def run_statutes(usps, force=False):
         store.finish_run(conn, run_id, "ok", msg, items=res["written"])
         _set(state="idle", message=msg)
         return res
+    except statutes.NotPublished as exc:
+        # Not a failure and not worth retrying: the corpus does not exist in
+        # this snapshot. Remembered, or the autopilot picks the same state
+        # every cooldown and no other state's statutes are ever downloaded —
+        # it sorts by population and this one can never be satisfied.
+        store.put(conn, statutes_absent_key(usps), "1")
+        conn.commit()
+        msg = str(exc)
+        store.finish_run(conn, run_id, "ok", msg, items=0)
+        _set(state="idle", message=msg)
+        return {"written": 0, "unavailable": True, "message": msg}
     except Exception as exc:
+        # Belt and braces for the case above: when the manifest could not be
+        # read, nothing warned us in advance and the provider's 404 is the
+        # only evidence this state has no corpus. Remember it anyway, or the
+        # autopilot picks the same unsatisfiable state every cooldown.
+        if _looks_like_missing_corpus(exc):
+            store.put(conn, statutes_absent_key(usps), "1")
+            conn.commit()
         store.finish_run(conn, run_id, "failed", str(exc)[:500])
         _set(state="error", message=str(exc)[:500])
         raise

@@ -118,6 +118,173 @@ class DeterministicFlagTests(unittest.TestCase):
         self.assertIn("over_cap", [f["code"] for f in flags])
 
 
+class QualityFlagTests(unittest.TestCase):
+    """The three extraction errors that kept reaching the database.
+
+    All three were being caught, expensively and inconsistently, by the AI
+    checker reading the whole document. They are mechanical.
+    """
+
+    def setUp(self):
+        try:
+            from collector import check
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.check = check
+
+    def _flags(self, row, doc="", place=None):
+        return [f["code"] for f in
+                self.check.deterministic_flags([row], doc, place=place)]
+
+    # ------------------------------------------------------- cross-references
+    def test_borough_pointer_is_flagged(self):
+        """'*Manhattan - see New York City' is not Manhattan's rate."""
+        quote = "*Manhattan - see New York City"
+        self.assertIn("cross_reference",
+                      self._flags(_finding_row(source_quote=quote), quote))
+
+    def test_prose_containing_see_is_not_flagged(self):
+        quote = "As you can see the county rate is 1.5%"
+        self.assertNotIn("cross_reference",
+                         self._flags(_finding_row(source_quote=quote), quote))
+
+    def test_tennessee_does_not_look_like_a_pointer(self):
+        quote = "Tennessee counties may levy 2.75%"
+        self.assertNotIn("cross_reference",
+                         self._flags(_finding_row(source_quote=quote), quote))
+
+    # ---------------------------------------------------------- combined rate
+    def _sales(self, **kw):
+        place = {"state_usps": "MI", "kind": "county", "category": "sales_use",
+                 "state_rate": 6.0}
+        place.update(kw)
+        return place
+
+    def test_local_rate_at_the_state_rate_is_flagged(self):
+        """6% recorded for Wayne County is Michigan's own statewide rate."""
+        codes = self._flags(_finding_row(rate_value=6.0), place=self._sales())
+        self.assertIn("combined_rate", codes)
+
+    def test_a_normal_local_add_on_is_not_flagged(self):
+        codes = self._flags(_finding_row(rate_value=0.5), place=self._sales())
+        self.assertNotIn("combined_rate", codes)
+
+    def test_no_state_row_on_file_means_no_guess(self):
+        """The comparison rate is read from the database or not used at all."""
+        codes = self._flags(_finding_row(rate_value=9.75),
+                            place=self._sales(state_rate=None))
+        self.assertNotIn("combined_rate", codes)
+
+    def test_non_percent_units_are_left_alone(self):
+        codes = self._flags(
+            _finding_row(rate_value=40.0, rate_unit="mills"),
+            place=self._sales(state_rate=5.75))
+        self.assertNotIn("combined_rate", codes)
+
+    def test_lodging_taxes_are_not_compared_to_the_state_rate(self):
+        """A county lodging tax is routinely several times its state's.
+
+        Only sales rate tables publish a combined state-plus-local figure, so
+        only there does a local rate at the state's rate mean anything.
+        """
+        codes = self._flags(
+            _finding_row(rate_value=8.0, instrument_code="hotel_motel"),
+            place=self._sales(category="lodging_meals", state_rate=1.0))
+        self.assertNotIn("combined_rate", codes)
+
+    # ------------------------------------------------------ wrong-state source
+    def test_source_from_another_states_site_is_a_hard_flag(self):
+        """Orange County NC was twice recorded as Orange County CA."""
+        place = {"state_usps": "CA", "kind": "county", "state_rate": None}
+        flags = self.check.deterministic_flags(
+            [_finding_row(url="https://www.dor.nc.gov/taxes/lodging")],
+            "", place=place)
+        hard = [f for f in flags if f["code"] == "wrong_state_source"]
+        self.assertEqual(len(hard), 1, flags)
+        self.assertTrue(hard[0]["hard"])
+
+    def test_own_states_site_is_fine(self):
+        place = {"state_usps": "CA", "kind": "county", "state_rate": None}
+        codes = self._flags(
+            _finding_row(url="https://cdtfa.ca.gov/rates"), place=place)
+        self.assertNotIn("wrong_state_source", codes)
+
+    def test_a_state_that_does_not_use_its_usps_code_is_not_flagged(self):
+        """Massachusetts is mass.gov, so there is nothing to read here."""
+        place = {"state_usps": "CA", "kind": "county", "state_rate": None}
+        codes = self._flags(
+            _finding_row(url="https://www.mass.gov/rates"), place=place)
+        self.assertNotIn("wrong_state_source", codes)
+
+    def test_veterans_affairs_is_not_virginia(self):
+        """va.gov is a federal department; Virginia uses virginia.gov."""
+        place = {"state_usps": "CA", "kind": "county", "state_rate": None}
+        codes = self._flags(
+            _finding_row(url="https://www.va.gov/exemptions"), place=place)
+        self.assertNotIn("wrong_state_source", codes)
+
+    def test_bulk_rows_are_exempt(self):
+        """An adapter's rate file lives wherever it is published."""
+        place = {"state_usps": "CA", "kind": "county", "state_rate": None}
+        codes = self._flags(
+            _finding_row(url="https://www.dor.nc.gov/f.csv",
+                         extraction_method="bulk_import"), place=place)
+        self.assertNotIn("wrong_state_source", codes)
+
+    def test_no_place_context_disables_the_outside_checks(self):
+        """Callers that pass rows alone keep the old behaviour."""
+        codes = self._flags(
+            _finding_row(rate_value=6.0, url="https://www.dor.nc.gov/x"))
+        self.assertNotIn("wrong_state_source", codes)
+        self.assertNotIn("combined_rate", codes)
+
+
+class PlaceContextTests(DbTest):
+    """What the checker is told about the jurisdiction it is judging."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            from collector import check, store
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.check = check
+        store.apply_schema(self.conn)
+
+    def test_state_rate_comes_from_the_states_own_row(self):
+        self.place(geoid="26", name="Michigan", state="MI", kind="state")
+        county = self.place(geoid="26163", name="Wayne County", state="MI",
+                            kind="county")
+        sid = self.source()
+        self.conn.execute(
+            "INSERT INTO tax_instrument (geoid, category, instrument_code, "
+            "status, rate_value, rate_unit, source_id, confidence, "
+            "extraction_method, retrieved_at) VALUES "
+            "('26','sales_use','state_general_sales','levied',6.0,'percent',"
+            "?,'high','manual',?)", (sid, db.now()))
+        self.conn.commit()
+        ctx = self.check.place_context(self.conn, county, "sales_use")
+        self.assertEqual(ctx["state_rate"], 6.0)
+        self.assertEqual(ctx["kind"], "county")
+        self.assertEqual(ctx["category"], "sales_use")
+        self.assertEqual(ctx["state_usps"], "MI")
+
+    def test_no_state_row_means_no_rate(self):
+        county = self.place(geoid="26163", name="Wayne County", state="MI",
+                            kind="county")
+        ctx = self.check.place_context(self.conn, county, "sales_use")
+        self.assertIsNone(ctx["state_rate"])
+
+    def test_a_state_is_not_compared_against_itself(self):
+        state = self.place(geoid="26", name="Michigan", state="MI",
+                           kind="state")
+        ctx = self.check.place_context(self.conn, state, "sales_use")
+        self.assertIsNone(ctx["state_rate"])
+
+    def test_unknown_geoid_is_empty(self):
+        self.assertEqual(self.check.place_context(self.conn, "99999", "x"), {})
+
+
 class ExcerptTests(DbTest):
     def setUp(self):
         super().setUp()
@@ -389,6 +556,61 @@ class MigrationTests(DbTest):
         self.assertEqual([r["mode"] for r in rows], ["burst"])
         for mode in ("fetch", "cog", "statutes"):
             self.store.start_run(self.conn, mode)
+
+    def test_an_old_batch_table_gains_the_empty_counter(self):
+        """A rebuild that copies positionally breaks when columns are added.
+
+        The 'unconfirmed' rebuild used INSERT ... SELECT *, so the moment
+        n_empty was retrofitted first, the oldest databases crashed on
+        startup with "table has 12 columns but 13 values were supplied".
+        """
+        self.conn.executescript("""
+            CREATE TABLE extract_batch (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, remote_id TEXT UNIQUE,
+                provider TEXT NOT NULL, model TEXT,
+                status TEXT NOT NULL CHECK (status IN (
+                    'building','submitted','ended','collected','failed')),
+                n_items INTEGER NOT NULL DEFAULT 0,
+                n_succeeded INTEGER NOT NULL DEFAULT 0,
+                n_failed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, submitted_at TEXT,
+                collected_at TEXT, message TEXT);
+        """)
+        self.conn.execute(
+            "INSERT INTO extract_batch (provider, status, n_items, "
+            "n_succeeded, n_failed, created_at) VALUES (?,?,?,?,?,?)",
+            ("anthropic", "collected", 5, 2, 3, db.now()))
+        self.conn.commit()
+        self.store.apply_schema(self.conn)
+        row = self.conn.execute(
+            "SELECT n_items, n_succeeded, n_failed, n_empty "
+            "FROM extract_batch").fetchone()
+        self.assertEqual(tuple(row), (5, 2, 3, 0))
+        # The rebuild's own purpose still works.
+        self.conn.execute(
+            "INSERT INTO extract_batch (provider, status, created_at) "
+            "VALUES ('anthropic','unconfirmed',?)", (db.now(),))
+        self.conn.commit()
+
+    def test_an_old_search_log_gains_the_results_column(self):
+        self.conn.executescript("""
+            CREATE TABLE search_query (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, geoid TEXT NOT NULL,
+                category TEXT NOT NULL, query TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'built_in',
+                tries INTEGER NOT NULL DEFAULT 0, last_outcome TEXT,
+                last_kept INTEGER, created_at TEXT NOT NULL,
+                last_tried_at TEXT, UNIQUE(geoid, category, query));
+        """)
+        self.conn.execute(
+            "INSERT INTO search_query (geoid, category, query, created_at) "
+            "VALUES ('39049','sales_use','q',?)", (db.now(),))
+        self.conn.commit()
+        self.store.apply_schema(self.conn)
+        row = self.conn.execute(
+            "SELECT query, results FROM search_query").fetchone()
+        self.assertEqual(row["query"], "q")
+        self.assertIsNone(row["results"])
 
     def test_unused_default_model_upgraded_once(self):
         """The old seeded reader default converges on the current default,
