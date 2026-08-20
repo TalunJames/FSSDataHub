@@ -323,6 +323,21 @@ class AdviceTests(DbTest):
         self.assertEqual(item["advice"]["label"], "Try again")
         self.assertEqual(item["advice"]["hint"], "Check the source.")
 
+    def test_flagged_rows_without_stored_advice_still_get_guidance(self):
+        # Rows checked before v0.6.0 have advice=NULL; the reviewer should
+        # still see how to weigh the reasons, not a blank.
+        self._finding()
+        self.conn.execute(
+            "INSERT INTO check_result (geoid, category, verdict, flags, "
+            "created_at) VALUES (?,?,'flag',?,?)",
+            (self.geoid, "sales_use",
+             json.dumps([{"instrument_code": "municipal_general_sales",
+                          "reason": "not a tax rate"}]), db.now()))
+        self.conn.commit()
+        advice = self.present.checker_advice(self.conn, self.geoid, "sales_use")
+        self.assertEqual(advice["status"], "")
+        self.assertIn("Try again", advice["hint"])
+
     def test_zero_row_items_get_a_fallback_hint(self):
         advice = self.present.checker_advice(
             self.conn, self.geoid, "sales_use",

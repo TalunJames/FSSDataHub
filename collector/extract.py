@@ -35,6 +35,11 @@ Rules:
 - If barred by state law, status is "prohibited" with the cite.
 - If you cannot find a rate, status is "unknown" and say why in notes.
 - Do not estimate, interpolate from neighbors, or invent numbers.
+- A number is a tax only if someone owes it to a government. Per-diem and
+  reimbursement schedules (what a government pays its own employees for
+  lodging, meals, or mileage), utility billing prices, and fee-for-service
+  price lists are not taxes. If the documents only carry these, leave the
+  tax unfound rather than record one.
 - Give the rate exactly as published, with its unit. Do not convert mills to
   percent. Percentages are percentages: two-thirds is 66.67, not 0.6667.
 - Dates must be ISO YYYY-MM-DD.

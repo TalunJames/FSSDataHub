@@ -21,6 +21,9 @@ DEFAULTS = {
     # the moment the planned queue empties.
     "autopilot_enabled": "1",
     "autopilot_bulk": "1",          # load free national bulk files first
+    # First crawl of an item reads cataloged rate books for its category
+    # before spending web-search quota; later attempts search as before.
+    "catalog_first": "1",
     "autopilot_statutes": "1",      # fetch statute corpora for open states
     "autopilot_elections": "1",     # research local ballot measures too
     "autopilot_chunk": "200",       # jurisdictions added to the queue per step
@@ -166,6 +169,19 @@ VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
 # Shown on the welcome screen after an update. Plain words, newest release
 # only — this is read by the owner, not a developer.
 WHATS_NEW = (
+    ("The catalog is read before the web is searched",
+     "The source catalog now records which questions each bulk file answers "
+     "(a millage table answers property, a referendum database answers "
+     "elections). A place's first crawl starts from the matching rate books "
+     "and skips the web search entirely — searches only run when the "
+     "catalog doesn't answer. Faster, and it saves search quota and pages."),
+    ("Reimbursement schedules are caught automatically",
+     "Some official pages list lodging or meal rates that are what a "
+     "government pays its own travelers, not a tax. The reader is now told "
+     "to skip these, and any that slip through are flagged with a clear "
+     "recommendation (usually Try again). Items flagged before "
+     "recommendations existed now show guidance too, instead of leaving "
+     "you to guess."),
     ("Reviews now come with a recommendation",
      "Every flagged item on the Review page now carries the checker's own "
      "read: which button it would press (publish, try again, or no such "

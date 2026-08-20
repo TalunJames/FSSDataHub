@@ -58,6 +58,7 @@ def _migrate(conn):
     """Add columns/tables that CREATE IF NOT EXISTS cannot retrofit."""
     _ensure_column(conn, "source", "content_sha256", "TEXT")
     _ensure_column(conn, "source", "content_changed", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "source", "categories", "TEXT")
     _ensure_column(conn, "tax_instrument", "source_quote", "TEXT")
     _allow_awaiting_ai(conn)
 
@@ -157,15 +158,23 @@ class Run(object):
 
 
 def get_or_create_source(conn, url, name, source_type="portal", authority_tier=4,
-                         scope_geoid=None, publisher=None, notes=None):
+                         scope_geoid=None, publisher=None, notes=None,
+                         categories=None):
     row = conn.execute(
-        "SELECT id FROM source WHERE url=? AND scope_geoid IS ?", (url, scope_geoid)
+        "SELECT id, categories FROM source WHERE url=? AND scope_geoid IS ?",
+        (url, scope_geoid)
     ).fetchone()
     if row:
+        # Keep the category tags of already-seeded rows current: existing
+        # databases got these sources before the tags existed.
+        if categories and categories != row["categories"]:
+            conn.execute("UPDATE source SET categories=? WHERE id=?",
+                         (categories, row["id"]))
         return row["id"]
     cur = conn.execute(
         "INSERT INTO source (scope_geoid, name, url, source_type, authority_tier, "
-        "publisher, notes) VALUES (?,?,?,?,?,?,?)",
-        (scope_geoid, name, url, source_type, authority_tier, publisher, notes),
+        "publisher, notes, categories) VALUES (?,?,?,?,?,?,?,?)",
+        (scope_geoid, name, url, source_type, authority_tier, publisher, notes,
+         categories),
     )
     return cur.lastrowid

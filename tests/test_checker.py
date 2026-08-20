@@ -48,6 +48,32 @@ class DeterministicFlagTests(unittest.TestCase):
         flags = self.check.deterministic_flags([_finding_row()], "")
         self.assertEqual(flags, [])
 
+    def test_reimbursement_schedule_is_hard_flagged(self):
+        doc = "Maximum lodging reimbursement rate NY City 342.00 23.00 69.00"
+        flags = self.check.deterministic_flags(
+            [_finding_row(label="transient lodging maximum reimbursement rate",
+                          source_quote="NY City 342.00 23.00 69.00")], doc)
+        codes = [f["code"] for f in flags]
+        self.assertIn("not_a_tax", codes)
+        hard = [f for f in flags if f["code"] == "not_a_tax"]
+        advice = self.check.hard_advice(hard)
+        self.assertEqual(advice["lean"], "try_again")
+        self.assertIn("per-diem", advice["hint"])
+
+    def test_per_diem_quote_is_hard_flagged(self):
+        doc = "Meals per diem for Travis County is $59"
+        flags = self.check.deterministic_flags(
+            [_finding_row(label=None,
+                          source_quote="Meals per diem for Travis County is $59")],
+            doc)
+        self.assertIn("not_a_tax", [f["code"] for f in flags])
+
+    def test_ordinary_tax_wording_is_not_flagged_as_reimbursement(self):
+        doc = "Rates page. The county sales tax rate is 1.5% effective 2024."
+        flags = self.check.deterministic_flags(
+            [_finding_row(label="county general sales tax")], doc)
+        self.assertNotIn("not_a_tax", [f["code"] for f in flags])
+
     def test_implausible_mills_flagged(self):
         doc = "the levy is 9000 mills"
         flags = self.check.deterministic_flags(
