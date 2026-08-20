@@ -879,6 +879,102 @@ class BothEnginesReportSearchTests(DbTest):
         self.assertEqual(pages, [])
 
 
+class ThreadLoopTests(unittest.TestCase):
+    """The loop a worker thread keeps for every item it handles.
+
+    Crawlee caches its storage instances process-wide and the asyncio locks
+    inside them bind to the loop that first touched them, so two items on one
+    thread have to share a loop or the second one trips over the first's.
+    """
+
+    def setUp(self):
+        try:
+            from collector import fetcher
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.fetcher = fetcher
+        self.addCleanup(self.fetcher.close_thread_loop)
+        self.fetcher.close_thread_loop()
+
+    def test_two_items_share_one_loop(self):
+        seen = []
+
+        async def note():
+            seen.append(asyncio.get_running_loop())
+
+        self.fetcher._run_item_on_thread_loop(note())
+        self.fetcher._run_item_on_thread_loop(note())
+        self.assertEqual(len(seen), 2)
+        self.assertIs(seen[0], seen[1])
+
+    def test_a_lock_from_the_first_item_still_works_in_the_second(self):
+        """The exact failure this replaced: a lock outliving its loop."""
+        holder = {}
+
+        async def make():
+            holder["lock"] = asyncio.Lock()
+
+        async def use():
+            async with holder["lock"]:
+                return True
+
+        self.fetcher._run_item_on_thread_loop(make())
+        self.assertTrue(self.fetcher._run_item_on_thread_loop(use()))
+
+    def test_an_abandoned_task_is_cancelled_before_the_next_item(self):
+        """A round that ignored its ceiling must not outlive its item."""
+        leaked = {}
+
+        async def forever():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                leaked["cancelled"] = True
+                raise
+
+        async def start():
+            leaked["task"] = asyncio.ensure_future(forever())
+            await asyncio.sleep(0)
+
+        self.fetcher._run_item_on_thread_loop(start())
+        self.assertTrue(leaked["task"].done())
+        self.assertTrue(leaked.get("cancelled"))
+
+    def test_each_thread_gets_its_own_loop(self):
+        import threading
+
+        loops = {}
+
+        def work(name):
+            async def note():
+                loops[name] = asyncio.get_running_loop()
+            self.fetcher._run_item_on_thread_loop(note())
+            self.fetcher.close_thread_loop()
+
+        threads = [threading.Thread(target=work, args=(n,)) for n in "ab"]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(loops), 2)
+        self.assertIsNot(loops["a"], loops["b"])
+
+    def test_closing_releases_the_loop(self):
+        async def note():
+            return asyncio.get_running_loop()
+
+        first = self.fetcher._run_item_on_thread_loop(note())
+        self.fetcher.close_thread_loop()
+        self.assertTrue(first.is_closed())
+        second = self.fetcher._run_item_on_thread_loop(note())
+        self.assertIsNot(first, second)
+        self.assertFalse(second.is_closed())
+
+    def test_closing_twice_is_harmless(self):
+        self.fetcher.close_thread_loop()
+        self.fetcher.close_thread_loop()
+
+
 class UnavailableTests(unittest.TestCase):
     def setUp(self):
         try:

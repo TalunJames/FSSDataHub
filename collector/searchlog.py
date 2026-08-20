@@ -19,6 +19,8 @@ unreachable the plan simply falls back to the untried built-ins: searching
 never waits on reflection.
 """
 
+import json
+
 from taxdb import db
 from taxdb.vocab import ELECTIONS, FRAMEWORK
 
@@ -79,7 +81,12 @@ def record_round(conn, geoid, category, diag):
     by_query = (diag or {}).pop("by_query", None) if diag else None
     if diag is not None:
         diag["by_query"] = {}
+    # Banked before the early return, and zeroed as it is banked. An item
+    # calls this once per search round, so a counter left standing would be
+    # charged again by the next round of the same item.
+    _bank_api_calls(conn, diag)
     if not by_query or not geoid:
+        conn.commit()
         return 0
     now = db.now()
     n = 0
@@ -90,18 +97,82 @@ def record_round(conn, geoid, category, diag):
             outcome = "found"
         else:
             outcome = "nothing"
+        # Only a round that actually found something replaces the cache. A
+        # blocked engine or an empty result must not wipe URLs that still
+        # work, or every throttled night would cost the allowance twice.
+        urls = info.get("urls") or []
+        results = json.dumps(urls) if urls else None
         conn.execute(
             "INSERT INTO search_query (geoid, category, query, source, tries, "
-            "last_outcome, last_kept, created_at, last_tried_at) "
-            "VALUES (?,?,?,?,1,?,?,?,?) "
+            "last_outcome, last_kept, results, created_at, last_tried_at) "
+            "VALUES (?,?,?,?,1,?,?,?,?,?) "
             "ON CONFLICT(geoid, category, query) DO UPDATE SET "
             "tries=tries+1, last_outcome=excluded.last_outcome, "
-            "last_kept=excluded.last_kept, last_tried_at=excluded.last_tried_at",
+            "last_kept=excluded.last_kept, last_tried_at=excluded.last_tried_at, "
+            "results=COALESCE(excluded.results, search_query.results)",
             (geoid, category, query, "built_in", outcome,
-             int(info.get("kept") or 0), now, now))
+             int(info.get("kept") or 0), results, now, now))
         n += 1
     conn.commit()
     return n
+
+
+def _bank_api_calls(conn, diag):
+    """Add this round's paid search calls to the month's running total.
+
+    Kept here rather than in `crawl` because this is the one place in the
+    search path that already holds a database connection.
+    """
+    made = int((diag or {}).get("api_calls") or 0)
+    if not made:
+        return
+    diag["api_calls"] = 0
+    from . import crawl
+    month = crawl.api_month()
+    s = store.get_all(conn)
+    before = 0 if (s.get("search_api_month") or "") != month \
+        else store.as_int(s.get("search_api_calls"), 0)
+    store.put_many(conn, {"search_api_month": month,
+                          "search_api_calls": str(before + made)})
+
+
+def reuse(conn, settings, geoid, category, queries):
+    """Split a plan into (urls already on file, queries still worth asking).
+
+    Wording this item ran recently, and that found something, is not asked
+    again: the URLs it returned are handed straight back. Government rate
+    pages do not move week to week, and an item that goes back in the queue
+    was paying the search allowance again for the same answer — which is
+    where a metered search plan actually goes.
+    """
+    days = store.as_int(settings.get("search_cache_days"), 7)
+    if days <= 0 or not queries:
+        return [], list(queries)
+    rows = conn.execute(
+        "SELECT query, results FROM search_query WHERE geoid=? AND category=? "
+        "AND results IS NOT NULL AND last_tried_at IS NOT NULL "
+        "AND last_tried_at >= datetime('now', ?)",
+        (geoid, category, "-%d days" % days)).fetchall()
+    fresh = {}
+    for r in rows:
+        try:
+            urls = json.loads(r["results"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(urls, list) and urls:
+            fresh[r["query"]] = [u for u in urls if isinstance(u, str)]
+    if not fresh:
+        return [], list(queries)
+    out, seen, remaining = [], set(), []
+    for q in queries:
+        if q in fresh:
+            for u in fresh[q]:
+                if u not in seen:
+                    seen.add(u)
+                    out.append(u)
+        else:
+            remaining.append(q)
+    return out, remaining
 
 
 def _log_rows(conn, geoid, category):

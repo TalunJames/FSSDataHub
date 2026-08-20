@@ -200,6 +200,148 @@ class SearchLogTests(DbTest):
         self.assertEqual(plan, self.built_in)
 
 
+class SearchReuseTests(DbTest):
+    """Not paying the search allowance twice for the same answer.
+
+    An item that goes back in the queue re-runs its plan. Every one of those
+    rounds used to be a fresh set of API calls returning the URLs already on
+    file, which is where a metered allowance actually goes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        try:
+            from collector import crawl, searchlog, store
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl, self.searchlog, self.store = crawl, searchlog, store
+        store.apply_schema(self.conn)
+        self.geoid = self.place()
+        self.conn.commit()
+
+    def _settings(self, **kw):
+        s = self.store.get_all(self.conn)
+        s.update(kw)
+        return s
+
+    def _found(self, query, urls):
+        self.searchlog.record_round(self.conn, self.geoid, "sales_use", {
+            "by_query": {query: {"kept": len(urls), "blocked": False,
+                                 "urls": list(urls)}}})
+
+    def test_a_query_that_found_urls_is_answered_from_the_log(self):
+        self._found("county sales tax rate", ["https://x.gov/rates"])
+        urls, remaining = self.searchlog.reuse(
+            self.conn, self._settings(), self.geoid, "sales_use",
+            ["county sales tax rate", "something new"])
+        self.assertEqual(urls, ["https://x.gov/rates"])
+        self.assertEqual(remaining, ["something new"])
+
+    def test_reuse_can_be_turned_off(self):
+        self._found("q", ["https://x.gov/a"])
+        urls, remaining = self.searchlog.reuse(
+            self.conn, self._settings(search_cache_days="0"), self.geoid,
+            "sales_use", ["q"])
+        self.assertEqual(urls, [])
+        self.assertEqual(remaining, ["q"])
+
+    def test_a_stale_result_is_searched_again(self):
+        self._found("q", ["https://x.gov/a"])
+        self.conn.execute(
+            "UPDATE search_query SET last_tried_at=datetime('now','-30 days')")
+        self.conn.commit()
+        urls, remaining = self.searchlog.reuse(
+            self.conn, self._settings(search_cache_days="7"), self.geoid,
+            "sales_use", ["q"])
+        self.assertEqual(urls, [])
+        self.assertEqual(remaining, ["q"])
+
+    def test_an_empty_round_does_not_wipe_working_urls(self):
+        """A throttled night must not cost the allowance twice."""
+        self._found("q", ["https://x.gov/a"])
+        self.searchlog.record_round(self.conn, self.geoid, "sales_use", {
+            "by_query": {"q": {"kept": 0, "blocked": True}}})
+        urls, _ = self.searchlog.reuse(
+            self.conn, self._settings(), self.geoid, "sales_use", ["q"])
+        self.assertEqual(urls, ["https://x.gov/a"])
+
+    def test_results_are_scoped_to_the_item(self):
+        self._found("q", ["https://x.gov/a"])
+        other = self.place(geoid="39051", name="Fulton County")
+        urls, remaining = self.searchlog.reuse(
+            self.conn, self._settings(), other, "sales_use", ["q"])
+        self.assertEqual(urls, [])
+        self.assertEqual(remaining, ["q"])
+
+
+class PaidSearchBudgetTests(DbTest):
+    """The monthly ceiling on paid search calls."""
+
+    def setUp(self):
+        super().setUp()
+        try:
+            from collector import crawl, searchlog, store
+        except ImportError as exc:
+            self.skipTest("collector deps missing: %s" % exc)
+        self.crawl, self.searchlog, self.store = crawl, searchlog, store
+        store.apply_schema(self.conn)
+        self.geoid = self.place()
+        self.conn.commit()
+
+    def _settings(self, **kw):
+        s = self.store.get_all(self.conn)
+        s.update(kw)
+        return s
+
+    def test_calls_are_banked_against_the_month(self):
+        self.searchlog.record_round(self.conn, self.geoid, "sales_use", {
+            "by_query": {"q": {"kept": 1, "blocked": False,
+                               "urls": ["https://x.gov/a"]}},
+            "api_calls": 3})
+        s = self.store.get_all(self.conn)
+        self.assertEqual(s["search_api_calls"], "3")
+        self.assertEqual(s["search_api_month"], self.crawl.api_month())
+
+    def test_calls_accumulate_within_a_month(self):
+        for _ in range(2):
+            self.searchlog.record_round(self.conn, self.geoid, "sales_use", {
+                "by_query": {}, "api_calls": 4})
+        self.assertEqual(
+            self.store.get_all(self.conn)["search_api_calls"], "8")
+
+    def test_a_round_is_not_charged_twice(self):
+        """An item calls record_round once per search round, on one diag."""
+        diag = {"by_query": {"q": {"kept": 0, "blocked": True}},
+                "api_calls": 5}
+        self.searchlog.record_round(self.conn, self.geoid, "sales_use", diag)
+        self.searchlog.record_round(self.conn, self.geoid, "sales_use", diag)
+        self.assertEqual(
+            self.store.get_all(self.conn)["search_api_calls"], "5")
+
+    def test_a_new_month_starts_from_zero(self):
+        self.store.put_many(self.conn, {"search_api_month": "1999-01",
+                                        "search_api_calls": "9000"})
+        self.conn.commit()
+        self.assertEqual(self.crawl.paid_search_calls(
+            self.store.get_all(self.conn)), 0)
+
+    def test_no_ceiling_by_default(self):
+        self.assertFalse(self.crawl.paid_search_exhausted(
+            self._settings(search_api_calls="100000")))
+
+    def test_the_ceiling_is_reached(self):
+        s = self._settings(search_api_monthly_cap="50",
+                           search_api_month=self.crawl.api_month(),
+                           search_api_calls="50")
+        self.assertTrue(self.crawl.paid_search_exhausted(s))
+
+    def test_below_the_ceiling_is_fine(self):
+        s = self._settings(search_api_monthly_cap="50",
+                           search_api_month=self.crawl.api_month(),
+                           search_api_calls="49")
+        self.assertFalse(self.crawl.paid_search_exhausted(s))
+
+
 class AdviceTests(DbTest):
     """The checker's recommendation beside every flagged item."""
 

@@ -37,9 +37,15 @@ toward trust.
 
 import json
 import re
+from urllib.parse import urlparse
 
-from taxdb import db, ledger
+from taxdb import db, fips, ledger
 from taxdb.vocab import ELECTIONS, FRAMEWORK
+
+# The one category whose published rate tables routinely give a combined
+# state-plus-local figure, which is the number that keeps being recorded as
+# a local rate. See the combined_rate check in deterministic_flags.
+SALES_USE = "sales_use"
 
 from . import extract, store
 
@@ -205,11 +211,59 @@ def soft_only(flags):
 NOT_A_TAX_TERMS = ("reimburs", "per diem", "travel allowance",
                    "lodging allowance", "mileage rate", "expense allowance")
 
+# A rate table cell that points somewhere else is not a rate. Boroughs are the
+# worst of it: "*Manhattan - see New York City" was repeatedly recorded as
+# Manhattan's own county rate, and "*Kings (Brooklyn) - see New York City" as
+# Brooklyn's. Anchored to a line start, a bullet, a table delimiter or a dash:
+# "see" after an ordinary word is prose ("as you can see, the rate rose"), and
+# matching that flagged healthy rows.
+CROSS_REFERENCE = re.compile(r"(?:^|[\n*•|(\[]|[-—–])\s*see\s+\S",
+                             re.IGNORECASE)
 
-def deterministic_flags(rows, doc_text):
+# States whose USPS code cannot be read out of a .gov host name. va.gov is the
+# Department of Veterans Affairs, not Virginia (which uses virginia.gov), and
+# treating it as a state code flags every county that cites a veterans
+# exemption. The full-name check below still covers these.
+USPS_NOT_IN_DOMAIN = frozenset(["VA"])
+
+
+def _host_state(url):
+    """The state whose website this is, from its host name, or None.
+
+    State governments are consistent about `xx.gov`, which makes a source
+    served from another state's site one of the few high-confidence signals
+    available without reading the document: a California county's lodging
+    rate does not come off North Carolina's revenue site.
+    """
+    host = (urlparse(url or "").hostname or "").lower()
+    if not host:
+        return None
+    labels = host.split(".")
+    if len(labels) >= 2 and labels[-1] == "gov":
+        code = labels[-2].upper()
+        if code in fips.STATE_NAMES and code not in USPS_NOT_IN_DOMAIN:
+            return code
+        for usps, name in fips.STATE_NAMES.items():
+            if labels[-2] == name.lower().replace(" ", ""):
+                return usps
+    return None
+
+
+def deterministic_flags(rows, doc_text, place=None):
+    """Contradictions and concerns that need no model call.
+
+    place, when given, is what `place_context` collected about the
+    jurisdiction these rows belong to: its own state, and what that state
+    charges for this category. Two of the checks below cannot be made from a
+    row alone, and this function deliberately has no database handle.
+    """
     flags = []
     flag = _flagger(flags)
     norm_doc = _norm(doc_text) if doc_text else ""
+    place = place or {}
+    own_state = (place.get("state_usps") or "").upper()
+    state_rate = place.get("state_rate")
+    combined_risk = place.get("category") == SALES_USE
 
     for r in rows:
         inst = r["instrument_code"]
@@ -248,6 +302,42 @@ def deterministic_flags(rows, doc_text):
         if r["confidence"] == "low":
             flag("low_confidence", inst,
                  "extractor marked this low confidence")
+        if quote and CROSS_REFERENCE.search(quote):
+            flag("cross_reference", inst,
+                 "the quote is a cross-reference telling the reader to look "
+                 "the rate up elsewhere, not a rate of this jurisdiction's own")
+        # A local add-on at or above its own state's rate is the shape of a
+        # combined state-plus-local figure recorded as if it were local. The
+        # comparison rate comes from the state's own row in this database;
+        # where there is none, the check simply does not fire.
+        #
+        # Sales tax only, and deliberately so: a combined state-plus-local
+        # figure is what sales rate tables actually publish, which is how
+        # Michigan's 6% became Wayne County's and 9.75% became Santa Clara's.
+        # Lodging and excise taxes do not stack that way — a county lodging
+        # tax is routinely several times its state's, so the same comparison
+        # there would flag healthy rows all day.
+        if (combined_risk and state_rate is not None and rate is not None
+                and unit == "percent" and rate >= state_rate):
+            flag("combined_rate", inst,
+                 "%s%% is at or above %s's own statewide rate of %s%% — check "
+                 "this is the local levy and not a combined state-plus-local "
+                 "figure" % (rate, own_state or "the state", state_rate))
+        # A same-named county in the wrong state is the one extraction error
+        # that produces a completely plausible-looking row: Orange County, NC
+        # was twice recorded as Orange County, CA. State governments are
+        # consistent about `xx.gov`, so the host name settles it. Bulk rows are
+        # exempt: an adapter's rate file legitimately lives on whichever site
+        # publishes it, and a state row citing another state is a different
+        # question from a county's own rate.
+        if own_state and not from_bulk and place.get("kind") != "state":
+            src_state = _host_state(_field(r, "url"))
+            if src_state and src_state != own_state:
+                flag("wrong_state_source", inst,
+                     "the source is served from %s's state website but this "
+                     "jurisdiction is in %s — confirm this is not a same-named "
+                     "county in another state" % (src_state, own_state),
+                     hard=True)
         # Time must not run backwards. Ingest files a clearly-older document
         # as history, so a regression or a dated-to-undated replacement here
         # means the machine could not tell which rate is current — a human
@@ -315,7 +405,7 @@ def live_framework(conn, usps, limit=80, thr_ids=None, ag_ids=None):
     return list(thr) + list(ag)
 
 
-def measure_flags(rows, doc_text):
+def measure_flags(rows, doc_text, place=None):
     """Deterministic checks on recorded measures."""
     flags = []
     flag = _flagger(flags)
@@ -354,7 +444,7 @@ def measure_flags(rows, doc_text):
     return flags
 
 
-def framework_flags(rows, doc_text):
+def framework_flags(rows, doc_text, place=None):
     """Deterministic checks on recorded thresholds and caps."""
     flags = []
     flag = _flagger(flags)
@@ -648,6 +738,37 @@ def summarize(flags, limit=3):
     return lead + " — " + "; ".join(parts)
 
 
+def place_context(conn, geoid, category):
+    """The jurisdiction behind these rows, and what its state charges.
+
+    `deterministic_flags` has no database handle on purpose — it is a pure
+    function over rows and text, which is what makes it cheap to test. The two
+    checks that have to look outside a single row get what they need from
+    here instead.
+
+    state_rate is the highest current statewide percent rate on file for this
+    category. It is read from the database, never assumed: where the state's
+    own row has not been collected yet the combined-rate check does not fire.
+    """
+    j = conn.execute(
+        "SELECT name, state_usps, kind FROM jurisdiction WHERE geoid=?",
+        (geoid,)).fetchone()
+    if not j:
+        return {}
+    ctx = {"name": j["name"], "state_usps": j["state_usps"], "kind": j["kind"],
+           "category": category, "state_rate": None}
+    if j["kind"] == "state" or not j["state_usps"]:
+        return ctx
+    row = conn.execute(
+        "SELECT MAX(t.rate_value) AS r FROM tax_instrument t "
+        "JOIN jurisdiction sj ON sj.geoid = t.geoid "
+        "WHERE sj.kind='state' AND sj.state_usps=? AND t.category=? "
+        "AND t.superseded_by IS NULL AND t.rate_unit='percent' "
+        "AND t.rate_value IS NOT NULL", (j["state_usps"], category)).fetchone()
+    ctx["state_rate"] = row["r"] if row else None
+    return ctx
+
+
 def subject(conn, geoid, category, claim_ids=None):
     """What to check for this work item, and how to describe it to the model.
 
@@ -706,7 +827,8 @@ def run_and_apply(conn, settings, run_id, geoid, category, doc_text,
                         (j["name"], j["state_usps"], j["kind"],
                          j["population"], geoid)) if j else geoid
 
-    mechanical = flag_fn(rows, doc_text)
+    mechanical = flag_fn(rows, doc_text,
+                         place=place_context(conn, geoid, category))
     hard = hard_only(mechanical)
     soft = soft_only(mechanical)
 

@@ -5,11 +5,14 @@ jurisdictions is a long project, and the ordering determines whether the
 first 500 rows cover 40% of the U.S. population or 0.4% of it.
 """
 
+import logging
 import math
 import sqlite3
 
 from . import db
 from .vocab import PASS_KINDS, WORK_CATEGORIES, WORK_STATUSES
+
+log = logging.getLogger("taxdb.ledger")
 
 # An adapter-filled row is a published rate file with a period label, an
 # archived copy of the bytes, and a tier-2 citation. That is better provenance
@@ -188,6 +191,13 @@ def park_bulk_covered(conn, pairs=None, commit=True):
         for geoid, cat in pairs:
             params += [geoid, cat]
     cur = conn.execute(sql, params)
+    if cur.rowcount:
+        # This sweep is correct but it used to be silent, and it is the one
+        # place a work item can leave needs_review without anyone deciding
+        # anything. A line in the log is what tells the difference between
+        # "the crawler found nothing" and "an adapter had already answered".
+        log.info("filed %d work item(s) an adapter had already answered",
+                 cur.rowcount)
     if commit:
         conn.commit()
     return cur.rowcount

@@ -210,7 +210,7 @@ class BatchTests(DbTest):
         # Downloaded but not yet ingested: applying is metered separately.
         self.assertEqual(self.batch.ready_depth(self.conn), 1)
         got = self.batch.apply_ready(self.conn, self._settings())
-        self.assertEqual(got, {"done": 1, "failed": 0})
+        self.assertEqual(got, {"done": 1, "empty": 0, "failed": 0})
         n = self.conn.execute(
             "SELECT COUNT(*) FROM tax_instrument WHERE geoid=?",
             (self.geoid,)).fetchone()[0]
@@ -235,7 +235,7 @@ class BatchTests(DbTest):
                                return_value=self._results_client(results)):
             self.batch.collect(self.conn, self._settings(), row)
         got = self.batch.apply_ready(self.conn, self._settings())
-        self.assertEqual(got, {"done": 0, "failed": 1})
+        self.assertEqual(got, {"done": 0, "empty": 0, "failed": 1})
         wi = self.conn.execute(
             "SELECT status, last_error FROM work_item WHERE geoid=? AND category=?",
             (self.geoid, "sales_use")).fetchone()
@@ -373,6 +373,77 @@ class BatchTests(DbTest):
             apply_result=lambda *a: applied.append(1) or True)
         self.assertEqual(len(applied), 10)
         self.assertEqual(got["done"], 10)
+
+    def test_an_empty_read_is_not_counted_as_a_failure(self):
+        """A county with no such tax is a real answer, not a broken read.
+
+        Filing the two together is what made a healthy pipeline report 88 of
+        106 items failed.
+        """
+        row = self._submit_one()
+        item = self.conn.execute(
+            "SELECT custom_id FROM extract_batch_item").fetchone()
+        results = [{"custom_id": item["custom_id"],
+                    "result": {"type": "succeeded",
+                               "message": {"content": [
+                                   {"type": "text",
+                                    "text": json.dumps({"findings": []})}]}}}]
+        with mock.patch.object(self.batch.httpx, "Client",
+                               return_value=self._results_client(results)):
+            self.batch.collect(self.conn, self._settings(), row)
+        got = self.batch.apply_ready(self.conn, self._settings())
+        self.assertEqual(got, {"done": 0, "empty": 1, "failed": 0})
+        counts = self.conn.execute(
+            "SELECT n_succeeded, n_empty, n_failed FROM extract_batch "
+            "WHERE id=?", (row["id"],)).fetchone()
+        self.assertEqual(counts["n_empty"], 1)
+        self.assertEqual(counts["n_failed"], 0)
+
+    def test_an_empty_read_says_why_on_the_item(self):
+        """A 'done' row with no note was the diagnostic's blind spot."""
+        row = self._submit_one()
+        item = self.conn.execute(
+            "SELECT custom_id FROM extract_batch_item").fetchone()
+        results = [{"custom_id": item["custom_id"],
+                    "result": {"type": "succeeded",
+                               "message": {"content": [
+                                   {"type": "text",
+                                    "text": json.dumps({"findings": []})}]}}}]
+        with mock.patch.object(self.batch.httpx, "Client",
+                               return_value=self._results_client(results)):
+            self.batch.collect(self.conn, self._settings(), row)
+        self.batch.apply_ready(self.conn, self._settings())
+        got = self.conn.execute(
+            "SELECT status, error FROM extract_batch_item").fetchone()
+        self.assertEqual(got["status"], "done")
+        self.assertIn("0 valid rows", got["error"])
+
+    def test_findings_are_credited_to_the_run_that_crawled_them(self):
+        """The crawl run is closed long before the batch comes back.
+
+        Without the retro-credit every continuous run reads '0 findings'
+        however much it collected, because in batch mode the reading happens
+        after the run that fetched the pages has finished.
+        """
+        row = self._submit_one()
+        item = self.conn.execute(
+            "SELECT custom_id FROM extract_batch_item").fetchone()
+        self.store.finish_run(self.conn, self.run_id, "ok", None,
+                              items=1, pages=4, findings=0)
+        body = json.dumps({"findings": [_finding(self.geoid)]})
+        results = [{"custom_id": item["custom_id"],
+                    "result": {"type": "succeeded",
+                               "message": {"content": [{"type": "text",
+                                                        "text": body}]}}}]
+        with mock.patch.object(self.batch.httpx, "Client",
+                               return_value=self._results_client(results)):
+            self.batch.collect(self.conn, self._settings(), row)
+        self.batch.apply_ready(self.conn, self._settings())
+        got = self.conn.execute(
+            "SELECT pages_fetched, findings_written FROM crawl_run WHERE id=?",
+            (self.run_id,)).fetchone()
+        self.assertEqual(got["findings_written"], 1)
+        self.assertEqual(got["pages_fetched"], 4)
 
     def test_a_poisonous_result_is_failed_not_retried_forever(self):
         row = self._submit_one()

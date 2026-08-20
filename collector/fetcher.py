@@ -68,9 +68,98 @@ def browser_available():
 # own. The slot is set by the worker thread before it processes an item.
 _slot = threading.local()
 
+# One event loop per worker thread, reused for every item that thread handles.
+# See _thread_loop for why this cannot be `asyncio.run` per item.
+_loops = threading.local()
+
 
 def set_slot(n):
     _slot.n = int(n)
+
+
+def _thread_loop():
+    """This thread's event loop, created on first use and then kept.
+
+    Crawlee caches storage instances process-wide, and the asyncio locks
+    inside them bind to whichever loop first touched them. `asyncio.run` per
+    item gave every item a brand new loop, so from the second item onward the
+    cached KeyValueStore behind Crawlee's statistics belonged to a loop that
+    was already closed. Every PERSIST_STATE tick then raised
+
+        RuntimeError: <asyncio.locks.Lock ...> is bound to a different event
+        loop
+
+    which Crawlee's event manager logged and swallowed: the crawl still ran,
+    but the statistics were never persisted and the log filled with
+    tracebacks. `_fresh_queue` dodges the same cache for the request queue by
+    inventing an alias per round; the stores Crawlee opens on its own cannot
+    be reached that way. Holding one loop for the life of the thread keeps
+    the cache and its locks in agreement instead.
+    """
+    loop = getattr(_loops, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _loops.loop = loop
+    return loop
+
+
+def _drain(loop):
+    """Cancel and retire whatever the item left behind.
+
+    `asyncio.run` did this when it closed the loop, and _run_capped relies on
+    it: a crawler round that ignored its ceiling is abandoned, not awaited.
+    Reusing the loop means doing the cleanup here, or one hung round would
+    keep running underneath every later item on this thread.
+    """
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+    except RuntimeError:
+        return
+    for task in pending:
+        task.cancel()
+    if pending:
+        try:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+    try:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        pass
+
+
+def _run_item_on_thread_loop(coro):
+    """asyncio.run's semantics on this thread's kept loop."""
+    loop = _thread_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        _drain(loop)
+
+
+def close_thread_loop():
+    """Release this thread's loop. Called when a worker thread retires.
+
+    Worker threads are built fresh for every run, so without this each run
+    would strand a loop and its file descriptors for the life of the process.
+    """
+    loop = getattr(_loops, "loop", None)
+    _loops.loop = None
+    if loop is None or loop.is_closed():
+        return
+    try:
+        _drain(loop)
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+        try:
+            asyncio.set_event_loop(None)
+        except Exception:
+            pass
 
 
 def current_slot():
@@ -147,10 +236,15 @@ def crawl_item(conn, client, settings, run_id, geoid, category, name, state,
         "text_shas": set(),
         "seed_hosts": crawl.seed_hosts_for(seed_urls),
         "thin": [],
+        # Pages bot protection refused. Kept apart from `thin` so they get
+        # first call on the render budget: a page a site actively refused an
+        # HTTP client is a real page, where a thin one is often a nav shell
+        # with nothing behind it.
+        "blocked_pages": [],
         "blocked_docs": [],
     }
     try:
-        asyncio.run(_run_item(
+        _run_item_on_thread_loop(_run_item(
             conn, settings, plan, run_id, geoid, category, name, state,
             seed_urls, ctx, client, kind, diag))
     except Exception as exc:
@@ -197,7 +291,7 @@ async def _run_item(conn, settings, plan, run_id, geoid, category, name, state,
                               extra, ctx, plan["max_pages"] - spent)
 
     if plan["render"] and browser_available():
-        if ctx["thin"]:
+        if ctx["thin"] or ctx["blocked_pages"]:
             await _render_round(conn, plan, run_id, geoid, category, ctx)
         if ctx["blocked_docs"]:
             await _fetch_round(conn, plan, run_id, geoid, category, ctx)
@@ -207,10 +301,12 @@ async def _fresh_queue():
     """A request queue of our own, for exactly one crawler round.
 
     Crawlee caches storage instances process-wide by (alias, storage_dir),
-    and the shared default queue broke two ways. First, `asyncio.run` per
-    item means the cached queue's lock is bound to a previous item's closed
-    event loop, so every item after the first crashed and fell back to the
-    legacy loop — silently, re-running its web searches. Second, pending
+    and the shared default queue broke two ways. First, a queue cached from a
+    previous item carried that item's event loop in its lock, so every item
+    after the first crashed and fell back to the legacy loop — silently,
+    re-running its web searches. `_thread_loop` now keeps one loop per worker
+    thread, which fixes that class of failure for the stores Crawlee opens on
+    its own too. Second, and still true whatever the loop does: pending
     requests left when one round hit its budget bled into the next round and
     the browser round, which then spent their budgets on someone else's URLs.
     A unique alias sidesteps the cache; drop() deletes the queue and evicts
@@ -296,9 +392,9 @@ async def _run_capped(crawler, requests, seconds, label, geoid, category):
     done, _ = await asyncio.wait({task}, timeout=60)
     if not done:
         task.cancel()
-        # Give the cancellation a moment to land; if it does not, asyncio.run
-        # retires the task on loop close and the worker-pool stall watchdog
-        # is the backstop for a task that ignores even that.
+        # Give the cancellation a moment to land; if it does not, `_drain`
+        # retires the task before the next item starts and the worker-pool
+        # stall watchdog is the backstop for a task that ignores even that.
         await asyncio.wait({task}, timeout=60)
     if task.done() and not task.cancelled():
         task.exception()  # collect it, or asyncio logs "never retrieved"
@@ -407,7 +503,7 @@ async def _http_round(conn, plan, run_id, geoid, category, name, state,
             if crawl.is_document_url(target):
                 ctx["blocked_docs"].append(target)
             else:
-                ctx["thin"].append(target)
+                ctx["blocked_pages"].append(target)
 
     try:
         await _run_capped(
@@ -428,7 +524,12 @@ async def _render_round(conn, plan, run_id, geoid, category, ctx):
 
     from . import crawl
 
-    urls = list(dict.fromkeys(ctx["thin"]))[:plan["render_pages"]]
+    # Refused first, then thin. The budget is small (four pages by default)
+    # and a night of 403s from one county's site used to spend it on nav
+    # shells while the pages we had actually been refused went unretried.
+    urls = list(dict.fromkeys(
+        list(ctx.get("blocked_pages") or []) + list(ctx["thin"])
+    ))[:plan["render_pages"]]
     if not urls:
         return
 

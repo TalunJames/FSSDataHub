@@ -221,6 +221,50 @@ class EngineHealthTests(unittest.TestCase):
         self.assertEqual(diag["blocked"], diag["queries"])
         self.assertGreater(diag["skipped"], 0)
 
+    def _run_with_stubs(self, settings):
+        """Run one search round, recording which engines were asked."""
+        calls = []
+
+        def stub(name, refused=True):
+            def go(*a, **kw):
+                calls.append(name)
+                return [], refused
+            return go
+
+        real = (self.crawl._brave_search, self.crawl._ddg_search,
+                self.crawl._bing_search)
+        self.crawl._brave_search = stub("brave")
+        self.crawl._ddg_search = stub("ddg")
+        self.crawl._bing_search = stub("bing")
+        try:
+            diag = self.crawl.new_diag()
+            self.crawl.search_web(
+                None, "Franklin County", "OH", "lodging_meals", kind="county",
+                settings=settings, diag=diag)
+        finally:
+            (self.crawl._brave_search, self.crawl._ddg_search,
+             self.crawl._bing_search) = real
+        return calls, diag
+
+    def test_paid_search_is_counted(self):
+        calls, diag = self._run_with_stubs(
+            {"search_provider": "brave", "search_api_key": "k",
+             "search_qpm": "0"})
+        self.assertIn("brave", calls)
+        self.assertEqual(diag["api_calls"], calls.count("brave"))
+
+    def test_the_monthly_ceiling_stops_paid_calls_not_the_crawl(self):
+        """Reaching your own ceiling drops to the scrapers, it does not stop."""
+        calls, diag = self._run_with_stubs(
+            {"search_provider": "brave", "search_api_key": "k",
+             "search_qpm": "0", "search_api_monthly_cap": "10",
+             "search_api_month": self.crawl.api_month(),
+             "search_api_calls": "10"})
+        self.assertNotIn("brave", calls)
+        self.assertEqual(diag["api_calls"], 0)
+        self.assertTrue(diag.get("paid_capped"))
+        self.assertIn("ddg", calls)
+
     def test_note_names_the_benched_engine_and_the_fix(self):
         note = self.crawl.search_note({
             "queries": 5, "answered": 0, "blocked": 5, "hits": 0, "kept": 0,

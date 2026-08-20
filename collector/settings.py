@@ -46,6 +46,18 @@ DEFAULTS = {
     # when nothing has been found yet the checker's model (free local by
     # default) reads what the crawler did see and proposes new wording.
     "search_learn": "1",
+    # How long a search result stays good. A county's rate page does not move
+    # week to week, and an item that goes back in the queue used to pay the
+    # search allowance again to be handed the same URLs. 0 turns reuse off.
+    "search_cache_days": "7",
+    # Monthly ceiling on paid search API calls. 0 = no ceiling (the provider's
+    # own plan is the only limit). When the count reaches the cap the crawler
+    # keeps working from the scraped engines instead of stopping.
+    "search_api_monthly_cap": "0",
+    # Bookkeeping for the cap, written by the collector: the calendar month
+    # being counted and the calls made in it.
+    "search_api_month": "",
+    "search_api_calls": "0",
     "schedule_enabled": "0",
     "schedule_kind": "daily",          # hourly | every_6h | daily | weekly
     "schedule_time": "02:00",
@@ -169,6 +181,36 @@ VALID_SCHEDULE = ("hourly", "every_6h", "daily", "weekly")
 # Shown on the welcome screen after an update. Plain words, newest release
 # only — this is read by the owner, not a developer.
 WHATS_NEW = (
+    ("Searches are not paid for twice",
+     "Wording a place has already tried, that found something, is now "
+     "answered from the search log for a week instead of being asked again. "
+     "A place that goes back in the queue used to spend the search "
+     "allowance afresh every time to be handed the same links. You can also "
+     "set your own monthly ceiling on paid search calls under Settings; "
+     "reaching it does not stop a run, the crawler carries on with the free "
+     "engines. Settings shows the count so far."),
+    ("Runs now show the findings they produced",
+     "With batch reading turned on, a run's pages are read minutes after "
+     "the run finishes, and the run table was reporting 0 findings however "
+     "much it collected. Findings are now credited back to the run that "
+     "crawled them. A run cut short by a restart is also stamped with its "
+     "own last activity rather than the time it was found, so a run that "
+     "died at midnight no longer reads as a fifteen-hour run."),
+    ("Three extraction mistakes are now caught for free",
+     "A rate table cell that says \"see New York City\" is a pointer, not a "
+     "rate, and was being recorded as the borough's own. A local rate at or "
+     "above its own state's rate is usually a combined figure. A document "
+     "served from another state's website is usually a same-named county in "
+     "the wrong state. All three are now caught without a model call, and "
+     "the last one goes straight to your review page."),
+    ("The report says what is in the database",
+     "The diagnostic download used to carry every error and no totals, "
+     "which made \"is it collecting anything?\" impossible to answer from it. "
+     "It now opens with counts (jurisdictions, findings, how many came from "
+     "rate books versus the crawler), a breakdown of work by status, and one "
+     "line per website that refused us. Reads that finished but found "
+     "nothing are shown too, instead of being counted as failures and then "
+     "hidden."),
     ("The catalog is read before the web is searched",
      "The source catalog now records which questions each bulk file answers "
      "(a millage table answers property, a referendum database answers "

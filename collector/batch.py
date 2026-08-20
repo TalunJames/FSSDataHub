@@ -40,6 +40,12 @@ API = "https://api.anthropic.com/v1/messages/batches"
 # Providers with a batch surface we speak.
 SUPPORTED = ("anthropic",)
 
+# What one downloaded result turned into. 'empty' is deliberately not
+# 'failed': the read worked, the document simply held nothing usable, and
+# counting the two together made a batch of honest empty reads — a county
+# that levies no lodging tax — look like a broken pipeline.
+APPLIED, EMPTY, FAILED = "done", "empty", "failed"
+
 
 def enabled(settings):
     """Batch mode is opt-in: it trades minutes of latency for half the bill."""
@@ -420,18 +426,35 @@ def ready_depth(conn):
     ).fetchone()[0]
 
 
+def _outcome(value):
+    """Normalise what apply_result returned.
+
+    apply_one speaks in APPLIED/EMPTY/FAILED. The injectable seam is allowed
+    to answer with a plain bool, which is how the tests drive it.
+    """
+    if value in (APPLIED, EMPTY, FAILED):
+        return value
+    return APPLIED if value else FAILED
+
+
 def apply_ready(conn, settings, limit=25, apply_result=None):
-    """Ingest and check a metered number of downloaded results."""
+    """Ingest and check a metered number of downloaded results.
+
+    'empty' is counted apart from 'failed'. A county that publishes no
+    lodging tax is not a broken read, and filing the two together made every
+    batch report look like a pipeline in trouble.
+    """
     apply_result = apply_result or apply_one
-    done = failed = 0
+    tally = {APPLIED: 0, EMPTY: 0, FAILED: 0}
     # Tallied per batch: one metered pass can apply items from several
     # batches, and crediting them all to the last item's batch made the
     # per-batch counts fiction.
     per_batch = {}
     for item in ready(conn, limit):
         try:
-            ok = apply_result(conn, settings, item, item["raw_response"],
-                              item["error"])
+            outcome = _outcome(apply_result(conn, settings, item,
+                                            item["raw_response"],
+                                            item["error"]))
         except (Exception, SystemExit) as exc:
             # Do not let one poisonous result loop forever on every tick —
             # and hand the work item to a human, or it sits at awaiting_ai
@@ -445,18 +468,20 @@ def apply_ready(conn, settings, limit=25, apply_result=None):
                               error=("batch result could not be applied: %s"
                                      % exc)[:500])
             conn.commit()
-            ok = False
-        done += 1 if ok else 0
-        failed += 0 if ok else 1
-        d, f = per_batch.get(item["batch_id"], (0, 0))
-        per_batch[item["batch_id"]] = (d + (1 if ok else 0), f + (0 if ok else 1))
-    for batch_id, (d, f) in per_batch.items():
+            outcome = FAILED
+        tally[outcome] += 1
+        counts = per_batch.setdefault(item["batch_id"],
+                                     {APPLIED: 0, EMPTY: 0, FAILED: 0})
+        counts[outcome] += 1
+    for batch_id, counts in per_batch.items():
         conn.execute(
             "UPDATE extract_batch SET n_succeeded=n_succeeded+?, "
-            "n_failed=n_failed+? WHERE id=?", (d, f, batch_id))
+            "n_failed=n_failed+?, n_empty=n_empty+? WHERE id=?",
+            (counts[APPLIED], counts[FAILED], counts[EMPTY], batch_id))
     if per_batch:
         conn.commit()
-    return {"done": done, "failed": failed}
+    return {"done": tally[APPLIED], "empty": tally[EMPTY],
+            "failed": tally[FAILED]}
 
 
 def apply_one(conn, settings, item, raw, err):
@@ -464,7 +489,9 @@ def apply_one(conn, settings, item, raw, err):
 
     Mirrors the synchronous path in worker._process from the extract call
     onward, so a batched item and a live one end up in the same state.
-    Returns True when the item produced rows.
+
+    Returns APPLIED when rows were written, EMPTY when the result was read
+    but held nothing usable, FAILED when it could not be read at all.
     """
     from taxdb import coverage, ledger
     from taxdb.vocab import ELECTIONS
@@ -506,7 +533,7 @@ def apply_one(conn, settings, item, raw, err):
         ledger.set_status(conn, geoid, category, "pending",
                           error=(err or "batch extract failed")[:500])
         close_item("failed", (err or "")[:500])
-        return False
+        return FAILED
 
     ingest.stamp_doc(doc, geoid=geoid, category=category, state_usps=state,
                      researcher=researcher)
@@ -516,22 +543,23 @@ def apply_one(conn, settings, item, raw, err):
 
     if res["written"] == 0:
         if category == ELECTIONS and not res["rejected"]:
+            note = "no revenue measures found; recorded as a coverage gap"
             coverage.assert_scope(
                 conn, "ballot_measure", geoid, scope_type="county",
                 completeness="spot_checked", measures_found=0,
                 basis="Collector searched the county elections office and found "
                       "no revenue measures in the documents it could reach.",
                 asserted_by="collector")
-            ledger.set_status(conn, geoid, category, "no_data",
-                              error="no revenue measures found; recorded as a "
-                                    "coverage gap")
+            ledger.set_status(conn, geoid, category, "no_data", error=note)
         else:
-            ledger.set_status(
-                conn, geoid, category, "needs_review",
-                error="extractor returned 0 valid rows (%d rejected); pages "
-                      "archived" % res["rejected"])
-        close_item("done", None)
-        return False
+            note = ("extractor returned 0 valid rows (%d rejected); pages "
+                    "archived" % res["rejected"])
+            ledger.set_status(conn, geoid, category, "needs_review", error=note)
+        # The reason is kept on the batch item too. It used to be dropped
+        # here, which left a 'done' row with nothing to say why it produced
+        # nothing — the single biggest blind spot in the diagnostic.
+        close_item("done", note)
+        return EMPTY
 
     if category == ELECTIONS and res["by_type"].get("measures"):
         coverage.assert_scope(
@@ -548,8 +576,14 @@ def apply_one(conn, settings, item, raw, err):
             "UPDATE work_item SET last_error=COALESCE(last_error || ' | ', '') || ? "
             "WHERE geoid=? AND category=?",
             (item["search_note"][:300], geoid, category))
+    # Credit the run that did the crawling. It was closed out minutes or hours
+    # ago with nothing to show for its pages, because in batch mode the
+    # reading happens here; without this every continuous run reads
+    # "0 findings" no matter how much it collected.
+    if item["run_id"]:
+        store.bump_run(conn, item["run_id"], findings=res["written"])
     close_item("done", None)
-    return True
+    return APPLIED
 
 
 # ------------------------------------------------------------------------ tick
@@ -561,8 +595,8 @@ def tick(conn, settings):
     piling more on top of it. Applying is metered so this never holds the
     coordinator long enough to stall crawling.
     """
-    out = {"collected": 0, "failed": 0, "submitted": 0, "batches": 0,
-           "waiting": 0, "ready": 0}
+    out = {"collected": 0, "empty": 0, "failed": 0, "submitted": 0,
+           "batches": 0, "waiting": 0, "ready": 0}
     reconcile_unconfirmed(conn, settings)
     for row in in_flight(conn):
         try:
@@ -587,6 +621,7 @@ def tick(conn, settings):
         conn, settings,
         limit=store.as_int(settings.get("batch_apply_per_tick"), 25))
     out["collected"] = applied["done"]
+    out["empty"] = applied["empty"]
     out["failed"] = applied["failed"]
     out["ready"] = ready_depth(conn)
 

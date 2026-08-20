@@ -7,6 +7,8 @@ before trusting a state wholesale.
 Requires pyarrow only for the fetch step. After load, grep is SQLite.
 """
 
+import json
+
 from . import db
 from .seed import fetch
 
@@ -25,13 +27,87 @@ class StatutesError(Exception):
     pass
 
 
+class NotPublished(StatutesError):
+    """This snapshot carries no statutes for that state.
+
+    Distinct from a download failure: retrying will not help, and the caller
+    should stop asking rather than burning a failed run per cooldown. The
+    v2026.08 snapshot publishes statutes for 50 of 52 jurisdictions; Georgia
+    and North Carolina have constitutions and guidance but no statute corpus,
+    and a bare "HTTP Error 404" gave no way to tell that from an outage.
+    """
+
+
 def parquet_url(usps, snapshot=SNAPSHOT):
     return PARQUET_URL % (snapshot, usps.lower())
+
+
+# The manifest is a 60KB index of every file in the snapshot. Read at most
+# once per process: it changes when the snapshot does, and the snapshot is
+# pinned in this module.
+_manifest_cache = {}
+
+
+def manifest(snapshot=SNAPSHOT, force=False):
+    """The snapshot's file index, or None when it cannot be read.
+
+    A manifest we cannot fetch must never be the reason a download is
+    refused, so every caller treats None as "no opinion".
+    """
+    if not force and snapshot in _manifest_cache:
+        return _manifest_cache[snapshot]
+    got = _read_manifest(force=force)
+    # `fetch` caches by file name, and the index is always index.json, so a
+    # snapshot bump would otherwise be answered from the previous snapshot's
+    # index. Disagreement means the copy on disk is stale: fetch it again.
+    if got and got.get("version") and got["version"] != snapshot and not force:
+        got = _read_manifest(force=True)
+    _manifest_cache[snapshot] = got
+    return got
+
+
+def _read_manifest(force=False):
+    try:
+        _path, _sha, blob = fetch(MANIFEST_URL, force=force)
+        data = json.loads(blob.decode("utf-8"))
+        return {"files": {f.get("file") for f in data.get("files") or []},
+                "version": data.get("version")}
+    except Exception:
+        return None
+
+
+def published(usps, snapshot=SNAPSHOT):
+    """Whether the snapshot has a statute corpus for this state.
+
+    True when the manifest lists it, False when the manifest is readable and
+    does not, and True when there is no manifest to consult — an unreachable
+    index is not evidence of absence.
+    """
+    man = manifest(snapshot)
+    if not man or not man.get("files"):
+        return True
+    return ("us_%s_statutes.parquet" % usps.lower()) in man["files"]
+
+
+def other_files(usps, snapshot=SNAPSHOT):
+    """What the snapshot does carry for a state, for the error message."""
+    man = manifest(snapshot)
+    if not man or not man.get("files"):
+        return []
+    prefix = "us_%s_" % usps.lower()
+    return sorted(f[len(prefix):].replace(".parquet", "")
+                  for f in man["files"] if f.startswith(prefix))
 
 
 def fetch_state(conn, usps, force=False, snapshot=SNAPSHOT):
     """Download one state's parquet and load statute_section."""
     usps = usps.upper()
+    if not published(usps, snapshot):
+        have = other_files(usps, snapshot)
+        raise NotPublished(
+            "%s has no statute corpus in snapshot %s%s" % (
+                usps, snapshot,
+                "; it does publish %s" % ", ".join(have) if have else ""))
     url = parquet_url(usps, snapshot)
     path, sha, blob = fetch(url, force=force)
     source_id = db.get_or_create_source(
