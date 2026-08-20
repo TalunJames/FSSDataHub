@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS source (
     content_sha256  TEXT,
     content_changed INTEGER NOT NULL DEFAULT 0,
     notes           TEXT,
+    -- Comma list of work categories this source answers (NULL = any).
+    -- Lets the crawler seed only the rate books that match the item.
+    categories      TEXT,
     UNIQUE(url, scope_geoid)
 );
 

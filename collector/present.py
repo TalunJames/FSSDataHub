@@ -365,8 +365,8 @@ def checker_advice(conn, geoid, category, last_error=None):
     nothing useful to say beyond the reasons already shown.
     """
     row = _one(
-        conn, "SELECT advice FROM check_result WHERE geoid=? AND category=? "
-              "ORDER BY id DESC LIMIT 1", (geoid, category))
+        conn, "SELECT advice, verdict FROM check_result WHERE geoid=? AND "
+              "category=? ORDER BY id DESC LIMIT 1", (geoid, category))
     if row and row["advice"]:
         try:
             adv = json.loads(row["advice"])
@@ -376,6 +376,17 @@ def checker_advice(conn, geoid, category, last_error=None):
             status = LEAN_STATUS.get((adv.get("lean") or "").strip().lower(), "")
             return {"status": status, "label": LEAN_LABEL.get(status, ""),
                     "hint": (adv.get("hint") or "").strip()}
+    if row and row["verdict"] in ("flag", "error"):
+        # Checked before recommendations existed (or the checker gave none):
+        # the reasons above are all there is, so say how to weigh them.
+        return {"status": "", "label": "",
+                "hint": "This was checked before recommendations existed, so "
+                        "there is no suggested button. Read the flag reasons "
+                        "against the quoted source: if the document is the "
+                        "wrong kind of thing (a reimbursement schedule, a "
+                        "state summary, an old year), choose Try again; if "
+                        "the number and the quote genuinely match a local "
+                        "tax, Publish it."}
     # Items that never reached the checker still deserve a pointer.
     le = last_error or ""
     if "returned 0 valid rows" in le:

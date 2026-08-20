@@ -196,6 +196,16 @@ def soft_only(flags):
     return [f for f in flags if not f.get("hard")]
 
 
+# Vocabulary of documents that carry official-looking dollar figures that are
+# not taxes: what a government pays or charges, not what anyone owes it.
+# Matched against the finding's label and quote after _norm (lowercased,
+# punctuation collapsed), so "per-diem" and "Per Diem" both hit "per diem".
+# A hit is a review flag, not a deletion — the rare tax document that talks
+# about reimbursement goes to a human with clear advice, which is the point.
+NOT_A_TAX_TERMS = ("reimburs", "per diem", "travel allowance",
+                   "lodging allowance", "mileage rate", "expense allowance")
+
+
 def deterministic_flags(rows, doc_text):
     flags = []
     flag = _flagger(flags)
@@ -216,6 +226,12 @@ def deterministic_flags(rows, doc_text):
             # hyphenation often enough that an exact miss is weak evidence.
             flag("quote_missing", inst,
                  "source_quote not found in the crawled text")
+        blob = _norm("%s %s" % (r["label"] or "", quote))
+        if blob and any(t in blob for t in NOT_A_TAX_TERMS):
+            flag("not_a_tax", inst,
+                 "the label or quote reads like a reimbursement or per-diem "
+                 "schedule (what a government pays, not a tax anyone owes)",
+                 hard=True)
         rate, unit = r["rate_value"], r["rate_unit"]
         if rate is not None and unit in PLAUSIBLE:
             lo, hi = PLAUSIBLE[unit]
@@ -448,6 +464,11 @@ ADVICE_LEANS = ("publish", "try_again", "no_such_tax", "unsure")
 # the model call (a contradiction is not a judgement call), so their advice
 # is written here, once, in plain words. Format: code -> (lean, hint).
 HARD_ADVICE = {
+    "not_a_tax": ("try_again",
+        "The words around this number describe a reimbursement or per-diem "
+        "schedule — what a government pays its own travelers — not a tax "
+        "anyone owes. Send it back so the crawler hunts for the real tax; "
+        "if this place truly has none, No such tax is the honest answer."),
     "implausible_rate": ("try_again",
         "The number is far outside anything plausible for its unit, which "
         "usually means units got mixed up (mills read as percent, or a "

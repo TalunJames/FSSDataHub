@@ -138,10 +138,16 @@ def seeds_for(conn, geoid, state_usps, settings, category=None):
             add(row["revenue_agency_url"])
 
     if j:
+        # Untagged sources (categories NULL) seed every item; tagged rate
+        # books only seed the items they actually answer, so a sales crawl
+        # does not spend its page budget on the state's millage tables.
         for row in conn.execute(
                 "SELECT url FROM source WHERE scope_geoid IN (?,?,?) "
+                "AND (categories IS NULL OR ','||categories||',' "
+                "     LIKE '%,'||?||',%') "
                 "ORDER BY authority_tier",
-                (geoid, j["state_fips"], j["county_fips"] or "")):
+                (geoid, j["state_fips"], j["county_fips"] or "",
+                 category or "")):
             add(row["url"])
 
     agency = STATE_AGENCIES.get((state_usps or "").upper())
@@ -149,6 +155,35 @@ def seeds_for(conn, geoid, state_usps, settings, category=None):
         add(agency[1])
 
     return urls
+
+
+def catalog_covers(conn, geoid, category):
+    """True if a cataloged bulk source is tagged for this item's category.
+
+    Tagged means someone decided this source answers this kind of question
+    (a rate book, a referendum database) — a stronger claim than the untagged
+    agency roots every item seeds. When it holds, the first crawl reads the
+    catalog before spending web-search quota; the no-signal fallback still
+    searches if the catalog disappoints.
+    """
+    j = conn.execute("SELECT state_fips, county_fips FROM jurisdiction "
+                     "WHERE geoid=?", (geoid,)).fetchone()
+    if not j:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM source WHERE scope_geoid IN (?,?,?) "
+        "AND categories IS NOT NULL "
+        "AND ','||categories||',' LIKE '%,'||?||',%' LIMIT 1",
+        (geoid, j["state_fips"], j["county_fips"] or "", category or "")
+    ).fetchone()
+    return row is not None
+
+
+def crawled_before(conn, geoid, category):
+    """True once any crawl has recorded a page for this item."""
+    return conn.execute(
+        "SELECT 1 FROM crawl_page WHERE geoid=? AND category=? LIMIT 1",
+        (geoid, category)).fetchone() is not None
 
 
 def search_queries(name, state, category, kind=None):
@@ -1065,6 +1100,15 @@ def item_seeds(conn, client, settings, geoid, category, name, state, kind,
 
     diag = diag if diag is not None else new_diag()
     seed_urls = seeds_for(conn, geoid, state, settings, category=category)
+    # Catalog first: when a cataloged bulk source is tagged for this exact
+    # category and the item has never crawled, skip the up-front search and
+    # read the catalog. Free where the rate book answers; the existing
+    # no-signal fallback searches anyway where it does not, and every later
+    # attempt searches as before.
+    if (seed_urls and store.as_bool(settings.get("catalog_first"))
+            and catalog_covers(conn, geoid, category)
+            and not crawled_before(conn, geoid, category)):
+        return seed_urls
     if store.as_bool(settings.get("web_search")):
         queries = searchlog.plan_round(
             conn, settings, geoid, category,
